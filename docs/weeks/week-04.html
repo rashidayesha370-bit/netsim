@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="glossary" content="">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NetSim Week 4 · The CPU: decode and encode</title>
+<style>
+:root{--bg:#fff;--ink:#16201b;--muted:#56615b;--line:#dfe5e1;--soft:#f3f7f4;--green:#173627;--mint:#5fc79a;--mint-ink:#1f7a55;--red:#d8142a;--yellow:#ffcb12;--code-bg:#f3f5f4;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1512;--ink:#e8efeb;--muted:#9aa8a0;--line:#26312b;--soft:#151d18;--mint-ink:#6fd3a7;--red:#ff5a67;--code-bg:#151d18;color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:18px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,"Helvetica Neue",Arial,sans-serif}
+.wrap{max-width:940px;margin:0 auto;padding-inline:20px}
+h1,h2,h3{line-height:1.15;margin:0;text-wrap:balance}
+h2{font-size:clamp(26px,4vw,34px);font-weight:800}
+h3{font-size:21px;font-weight:700;margin-top:6px}
+p{margin:0}
+a{color:var(--mint-ink);text-underline-offset:3px}
+code,pre,.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+code{background:var(--code-bg);padding:1px 6px;border-radius:4px;font-size:.88em}
+pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:14px 16px;overflow-x:auto;margin:0;font-size:.86em;line-height:1.55}
+pre code{background:none;padding:0}
+pre.prompt{white-space:pre-wrap;overflow-wrap:anywhere}
+.round{border-top:1px solid var(--line);padding-top:18px}
+details.notes{min-width:0}
+.hero{background:var(--green);color:#fff;padding-block:52px 44px}
+.hero .wrap{display:grid;gap:12px}
+.tag{font:700 13px/1 ui-monospace,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase;color:#a8e3c8}
+.hero h1{font-size:clamp(36px,6.5vw,60px);font-weight:800;letter-spacing:-.02em}
+.hero p{font-size:19px;color:#d7e6de;max-width:66ch}
+main{display:grid;gap:52px;padding-block:40px 72px}
+section{display:grid;gap:16px}
+.lede{font-size:19px;color:var(--muted);max-width:66ch}
+ul,ol{margin:0;padding-left:24px;display:grid;gap:6px}
+li,section,main>*{min-width:0}
+.steps>li{padding-left:4px}
+.steps>li+li{border-top:1px solid color-mix(in srgb,var(--muted) 45%,transparent);padding-top:18px;margin-top:8px}
+.steps>li>ul{margin-top:6px}
+.check{background:var(--soft);border-left:4px solid var(--mint);padding:10px 14px;border-radius:0 6px 6px 0}
+.note{background:var(--soft);border-left:4px solid var(--yellow);padding:10px 14px;border-radius:0 6px 6px 0}
+.warn{background:var(--soft);border-left:4px solid var(--red);padding:10px 14px;border-radius:0 6px 6px 0}
+.diagram{margin:0;max-width:100%;min-width:0;overflow-x:auto;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fff}
+.diagram svg{display:block;width:100%;height:auto}
+.diagram text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Arial,sans-serif}
+.diagram text.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+.caption{font-size:15px;color:var(--muted)}
+.table-wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:16px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+.cards>div{border:1px solid var(--line);border-radius:10px;padding:14px 16px;display:grid;gap:8px;align-content:start}
+.minutes{font:700 13px/1 ui-monospace,Menlo,monospace;color:var(--mint-ink)}
+details{border:1px solid var(--line);border-radius:8px;padding:10px 14px}
+details+details{margin-top:8px}
+summary{cursor:pointer;font-weight:700}
+details[open] summary{margin-bottom:8px}
+.box{display:inline-block;width:18px;height:18px;border:2px solid var(--mint);border-radius:4px;vertical-align:-3px;margin-right:8px}
+ul.checklist{list-style:none;padding-left:0}
+.toc{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:15px}
+@media (max-width:640px){body{font-size:17px}.hero{padding-block:36px 30px}main{gap:40px}}
+@media print{
+  :root{--bg:#fff;--ink:#000;--muted:#333;--line:#bbb;--soft:#f4f4f4}
+  .hero{background:#fff;color:#000;border-bottom:3px solid #000;padding-block:10px}
+  .hero p,.tag{color:#000}
+  .diagram{overflow:visible;break-inside:avoid}
+  .diagram svg{min-width:0!important}
+  section{break-inside:auto}
+  h2,h3{break-after:avoid}
+  a{color:#000}
+}
+</style>
+</head>
+<body>
+<header class="hero"><div class="wrap">
+<div class="tag">Week 4 · Moved</div>
+<h1>Week 4 · The CPU: decode and encode</h1>
+<p>Week 4's class moved into week 5. Its two build steps are there:</p>
+</div></header>
+<main class="wrap">
+<ul><li><b><code>decode</code></b> is step 1 of Week 5: 4 bytes in, an instruction (or an error) out.</li>
+<li><b><code>encode</code></b> is step 2 of Week 5: <code>decode</code> backwards, which the assembler uses.</li></ul>
+<p>Open Week 5's <b>Build</b> tab: both steps are in its list, with their prompts and tests.</p></main>
+<script>addEventListener('beforeprint',()=>document.querySelectorAll('details').forEach(d=>d.open=true));</script>
+</body>
+</html>

@@ -83,7 +83,7 @@ export function checkCommand(dir, week) {
  * This studio's version. On start it looks at the newest published week: a newer studio there
  * runs instead (see newerStudio), so every student uses the same one, whatever week their folder has.
  */
-export const STUDIO_VERSION = 7;
+export const STUDIO_VERSION = 17;
 /**
  * The course's weeks, in order. weeks.json in the course is the list the studio shows (read from
  * GitHub on start, so a new title shows up without a new studio); this copy is the fallback offline.
@@ -95,11 +95,11 @@ export const COURSE_WEEKS = [
   { week: 1, title: "Setup & system roles", kind: "setup", guide: "docs/weeks/week-01.md", page: "docs/weeks/week-01.html", note: "docs/notes/week-01.md", board: false },
   { week: 2, title: "Design: the machine and its bus", kind: "design", guide: "docs/weeks/week-02.md", page: "docs/weeks/week-02.html", note: "docs/notes/week-02.md", board: false },
   { week: 3, title: "Build: bus + memory on screen", kind: "build", guide: "docs/weeks/week-03.md", page: "docs/weeks/week-03.html", note: null, board: true },
-  { week: 4, title: "Design: the CPU", kind: "design", guide: "docs/weeks/week-04.md", page: "docs/weeks/week-04.html", note: "docs/notes/week-04.md", board: false },
-  { week: 5, title: "Build: a CPU that runs programs", kind: "build", guide: "docs/weeks/week-05.md", page: "docs/weeks/week-05.html", note: null, board: true },
-  { week: 6, title: "Design: scheduling + interrupts", kind: "design", guide: "docs/weeks/week-06.md", page: "docs/weeks/week-06.html", note: "docs/notes/week-06.md", board: false },
-  { week: 7, title: "Build: cores, scheduler, interrupts", kind: "build", guide: "docs/weeks/week-07.md", page: "docs/weeks/week-07.html", note: null, board: true },
-  { week: 8, title: "Demo: ship it", kind: "demo", guide: "docs/weeks/week-08.md", page: null, note: null, board: true },
+  { week: 4, title: "Build: decode and encode (in week 5)", kind: "design", guide: "docs/weeks/week-04.md", page: "docs/weeks/week-04.html", note: null, board: false },
+  { week: 5, title: "Design + build: a CPU that runs programs", kind: "build", guide: "docs/weeks/week-05.md", page: "docs/weeks/week-05.html", note: null, board: true },
+  { week: 6, title: "Build: taking turns and interrupts", kind: "design", guide: "docs/weeks/week-06.md", page: "docs/weeks/week-06.html", note: null, board: false },
+  { week: 7, title: "Build: many cores on the board", kind: "build", guide: "docs/weeks/week-07.md", page: "docs/weeks/week-07.html", note: null, board: true },
+  { week: 8, title: "Demo: ship it", kind: "demo", guide: "docs/weeks/week-08.md", page: "docs/weeks/week-08.html", note: null, board: true },
 ];
 /**
  * The newest week fetched from the course (upstream/week-N, from the course's week-N tag): where a
@@ -219,7 +219,7 @@ const CODEX_FLAGS = ["-c", "check_for_update_on_startup=false"];
  *   mtime?: (path: string) => number | null,
  *   readText: (path: string) => string | null,
  *   save?: () => void,
- *   state: { madeFolder?: string, movedOld?: string, login?: string, seenLogin?: string, parent?: string, repoDir?: string, chatgpt?: string, doctorOk?: boolean, refused?: { dir: string, why: string }, codexVersion?: string, dryDone?: Record<string, boolean>, dryFound?: Record<string, string> },
+ *   state: { madeFolder?: string, movedOld?: string, login?: string, seenLogin?: string, parent?: string, repoDir?: string, chatgpt?: string, doctorOk?: boolean, refused?: { dir: string, why: string }, codexVersion?: string, agentThreads?: Record<string, string>, dryDone?: Record<string, boolean>, dryFound?: Record<string, string> },
  * }} Context
  */
 
@@ -375,6 +375,20 @@ export function parseRemote(url) {
   const scp = /^(?:[^@/:]+@)?([^/:\\]{2,}):([^/]+)\/([^/]+)$/.exec(trimmed);
   if (scp) return { protocol: "ssh", host: scp[1], owner: scp[2], repo: scp[3] };
   return null;
+}
+
+/**
+ * Is Codex signed in? `codex login status`, which reads whichever store this laptop uses.
+ * @param {Context} ctx
+ */
+export function codexSignedIn(ctx) {
+  // Codex keeps its sign-in in the keychain or in auth.json: ask it (once it has run, so a Mac's first-run
+  // check is out of the way), and only fall back to the file before that.
+  if (ctx.state.codexVersion) {
+    const r = ctx.capture(["codex", ...CODEX_FLAGS, "login", "status"]);
+    if (r) return r.code === 0;
+  }
+  return ctx.exists(join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "auth.json"));
 }
 
 /**
@@ -1129,13 +1143,32 @@ export function courseSteps() {
       // it, which can take minutes. It looks for the program instead, and runs `codex --version`
       // once, visibly, after installing.
       check: async (ctx) => {
-        const auth = join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "auth.json");
         const version = ctx.state.codexVersion ? ` (${ctx.state.codexVersion})` : "";
         if (!onPath(ctx, "codex")) return { done: false, found: "Codex isn't installed yet." };
-        return { done: ctx.exists(auth), found: ctx.exists(auth) ? `Codex is installed${version} and signed in.` : `Codex is installed${version} but not signed in.` };
+        if (ctx.state.codexVersion && versionOlder(ctx.state.codexVersion, CODEX_MIN_VERSION)) return { done: false, found: `Codex ${ctx.state.codexVersion} is too old for the studio's Agent tab (it needs ${CODEX_MIN_VERSION} or newer).` };
+        const signedIn = codexSignedIn(ctx);
+        return { done: signedIn, found: signedIn ? `Codex is installed${version} and signed in.` : `Codex is installed${version} but not signed in.` };
       },
       plan: (ctx) => {
         const installed = onPath(ctx, "codex");
+        const old = installed && ctx.state.codexVersion && versionOlder(ctx.state.codexVersion, CODEX_MIN_VERSION);
+        if (old)
+          return [
+            cmd("npm install -g @openai/codex@latest", ["npm", "install", "-g", "@openai/codex@latest"], {
+              what: "Updates Codex to the newest version.",
+              words: [["npm", "Node's installer for packages"], ["-g", "global: for the whole laptop"], ["@latest", "the newest version"]],
+              record: (/** @type {Context} */ c) => {
+                delete c.state.codexVersion; // read again below
+              },
+            }),
+            {
+              kind: /** @type {const} */ ("auto"),
+              command: { display: "codex --version", argv: ["codex", ...CODEX_FLAGS, "--version"], what: "Checks the version you have now.", record: (/** @type {Context} */ c, /** @type {string} */ text) => {
+                const version = /\d+\.\d+\.\d+[\w.-]*/.exec(text)?.[0];
+                if (version) c.state.codexVersion = version;
+              } },
+            },
+          ];
         return [
           ...(installed
             ? []
@@ -1284,8 +1317,33 @@ export function findWeek(ctx, dir) {
   const sorted = [...tips.keys()].sort((a, b) => a - b);
   // In work already: that commit is here and work contains it.
   const merged = (/** @type {number} */ n) => ctx.capture(["git", "merge-base", "--is-ancestor", /** @type {string} */ (tips.get(n)), "work"], dir)?.code === 0;
-  for (const n of sorted) if (!merged(n)) return { week: n, published: true };
+  const waiting = sorted.filter((n) => !merged(n));
+  if (waiting.length) return { week: /** @type {number} */ (newestHolding(ctx, dir, waiting, tips)), published: true };
   return { week: (sorted.at(-1) ?? 1) + 1, published: false };
+}
+
+/**
+ * Which of the weeks waiting to get to offer: the newest one that already holds all the ones before
+ * it (each release is built on the last), so one "Get this week's work" brings them all. A student
+ * who's weeks behind doesn't get them one at a time. Weeks that don't line up are got in order.
+ * @param {Context} ctx
+ * @param {string} dir
+ * @param {number[]} waiting  the released weeks not in work, in order
+ * @param {Map<number, string>} tips  each week's latest commit
+ * @returns {number | null}
+ */
+function newestHolding(ctx, dir, waiting, tips) {
+  // Comparing the weeks needs their commits: fetch the week tags if one isn't here yet (it only
+  // moves upstream/week-N, never the student's work).
+  const missing = (/** @type {number} */ n) => ctx.capture(["git", "cat-file", "-e", `${tips.get(n)}^{commit}`], dir)?.code !== 0;
+  if (waiting.length > 1 && !ctx.dryRun && waiting.some(missing)) ctx.capture(gitArgv(ctx, ["fetch", "-q", "upstream"]), dir);
+  let toGet = waiting[0] ?? null;
+  for (const n of waiting.slice(1)) {
+    const holds = waiting.filter((m) => m < n).every((m) => ctx.capture(["git", "merge-base", "--is-ancestor", /** @type {string} */ (tips.get(m)), /** @type {string} */ (tips.get(n))], dir)?.code === 0);
+    if (!holds) break;
+    toGet = n;
+  }
+  return toGet;
 }
 
 /**
@@ -1901,10 +1959,11 @@ const ACCOUNT_STEPS = new Set(["gh-login", "git-helper", "fork", "clone", "push"
  * current step planned, and only once the typed text matches.
  * @param {Context} ctx
  * @param {Step[]} steps
- * @param {{ mode?: "setup" | "week", week?: number, published?: boolean, setupSteps?: number, autoSteps?: number, inWork?: boolean, next?: number, groups?: WeekGroup[], update?: boolean, focus?: number }} [meta]  what the page is for:
+ * @param {{ mode?: "setup" | "week", week?: number, published?: boolean, setupSteps?: number, autoSteps?: number, inWork?: boolean, next?: number, groups?: WeekGroup[], update?: boolean, focus?: number, home?: number }} [meta]  what the page is for:
  *   setup (week 1), or getting week N (published: false when week N isn't out yet)
+ * @param {{ agentTransport?: (cwd: string) => AgentTransport }} [options]  (tests: a scripted Codex)
  */
-export function createStudio(ctx, steps, meta = {}) {
+export function createStudio(ctx, steps, meta = {}, options = {}) {
   const setupSteps = meta.mode === "week" ? (meta.setupSteps ?? 0) : 0;
   // How many leading steps tick themselves off when done: the setup, or everything when the week is already in.
   const autoSteps = meta.mode === "week" ? (meta.autoSteps ?? setupSteps) : 0;
@@ -2031,6 +2090,7 @@ export function createStudio(ctx, steps, meta = {}) {
       checks: { week: checks.week, phase: checks.phase, out: cleanOutput(checks.out) },
       code,
       focus: meta.focus ?? 0,
+      home: meta.home ?? 0,
       update: Boolean(meta.update),
       next: meta.next ?? 0,
       // Only on the finish screen: it asks git.
@@ -2129,7 +2189,21 @@ export function createStudio(ctx, steps, meta = {}) {
   /** Runs the next action if it needs no typing. @param {number} mine */
   async function advance(mine) {
     const action = plan[view.index];
-    if (action?.kind === "auto") await runCommand(/** @type {Command} */ (commandOf(action, ctx)), mine, true);
+    const command = action ? commandOf(action, ctx) : null;
+    // Never an account change by itself (gh auth switch): that's the person's call.
+    // Never an account change (gh auth switch) or undoing a merge (it would throw away a hand-resolved,
+    // uncommitted merge) by itself: those are the person's call.
+    const theirs = command && (command.argv[0] === "gh" || (command.argv[0] === "git" && command.argv.includes("--abort")));
+    if (action?.kind === "auto" || (command && resuming() && !command.waitFor && !theirs)) await runCommand(/** @type {Command} */ (command), mine, true);
+  }
+
+  /**
+   * Getting the week's work runs by itself (save, fetch, merge, push, install, check): students do it
+   * every week. Only the week steps after setup, and never a command that needs the person (a
+   * browser sign-in): a step that fails stops here, saying what to do, as before.
+   */
+  function resuming() {
+    return meta.mode === "week" && setupSteps > 0 && current >= setupSteps && current < steps.length && !ctx.dryRun;
   }
 
   /** @param {string} text @param {boolean} [already] */
@@ -2140,6 +2214,7 @@ export function createStudio(ctx, steps, meta = {}) {
     view = { ...blank("passed"), already, index: view.index };
     if (!ctx.dryRun) ctx.save?.();
     publish();
+    if (resuming() && !acct) void enter(current + 1);
   }
 
   /** @param {{ what: string, fix: string, back?: number, stop?: boolean, items?: { check: string, found: string, fix: string }[] }} error */
@@ -2355,15 +2430,17 @@ export function createStudio(ctx, steps, meta = {}) {
   }
 
   // ── Tasks written in the studio (the week's Code tab) ──
-  /** @type {Record<string, { phase: "running" | "passed" | "failed" | "error", passed?: number, failed?: number, failures?: { test: string, message: string, own?: boolean }[], waiting?: string[], error?: string, committed?: string }>} */
+  /** @type {Record<string, { phase: "running" | "passed" | "failed" | "error", passed?: number, failed?: number, failures?: { test: string, message: string, own?: boolean }[], waiting?: string[], blocked?: number, error?: string, committed?: string, done?: boolean, rev?: string }>} */
   let code = {};
   /** @type {Running | null} */
   let codeRun = null;
+  let checking = false; // buildCheck is walking the steps
+  let checkQueued = false; // buildCheck waits for a test run to finish
 
   /** A week the student has in their work (its page, board, checks and code open). @param {number} week */
   function weekIn(week) {
     const g = (meta.groups ?? []).find((x) => x.week === week);
-    return Boolean(g && (["setup", "done", "inwork"].includes(g.status) || (g.status === "get" && current >= steps.length)));
+    return Boolean(g && (["setup", "done", "inwork", "open"].includes(g.status) || (g.status === "get" && current >= steps.length)));
   }
 
   /** @param {Record<string, unknown>} a */
@@ -2374,51 +2451,179 @@ export function createStudio(ctx, steps, meta = {}) {
     if (codeRun) return reject(409, "The tests are still running for the last save.");
     const task = weekCode(ctx, dir, week).find((t) => t.id === a.id && t.file === a.file);
     if (!task) return reject(404, "That isn't one of this week's tasks.");
-    const id = task.id;
-    const saved = writeRegion(dir, { file: a.file, id, week, rev: a.rev, body: a.body });
+    const saved = writeRegion(dir, { file: a.file, id: task.id, week, rev: a.rev, body: a.body });
     if ("error" in saved) return { ...reject(409, saved.error) };
+    runTaskTests(dir, week, { ...task, rev: saved.rev });
+    return { ...ok, rev: saved.rev };
+  }
+
+  /** "Run its tests": the file as it is, nothing written (the student pressed it). @param {Record<string, unknown>} a */
+  function testCode(a) {
+    const dir = ctx.state.repoDir;
+    const week = Number(a.week);
+    if (!dir || !Number.isInteger(week) || !weekIn(week)) return reject(409, "That week isn't in your work yet.");
+    if (codeRun) return reject(409, "The tests are still running.");
+    const task = weekCode(ctx, dir, week).find((t) => t.id === a.id);
+    if (!task) return reject(404, "That isn't one of this week's tasks.");
+    runTaskTests(dir, week, task, a.fromAgent === true ? "agent" : "");
+    return ok;
+  }
+
+  /**
+   * @param {string} dir @param {number} week @param {ReturnType<typeof weekCode>[number]} task
+   * @param {"" | "agent" | "sandbox" | "check"} [from]  "agent": the student pressed it in the Agent tab, say the result there.
+   *   "sandbox": the end of a turn, nobody pressed anything: in Codex's sandbox, and said there too.
+   *   "check": the Build view finding where the student is: in the sandbox, nothing said.
+   * @param {(green: boolean) => void} [then]  called with whether it came out green
+   */
+  function runTaskTests(dir, week, task, from = "", then = () => {}) {
+    const id = task.id;
+    // "check": the Build view checking where the student is, quietly, in the sandbox (nobody pressed anything).
+    const quiet = from === "check";
+    const sandboxed = from === "sandbox" || quiet;
+    if (from && !quiet) agent.testOfferDone(id);
     code = { ...code, [id]: { phase: "running" } };
     publish();
     const report = join(tmpdir(), `netsim-studio-${process.pid}-${id}.json`);
-    const argv = [process.execPath, join(dir, "node_modules", "vitest", "vitest.mjs"), "run", ...task.tests, "--reporter=json", `--outputFile=${report}`];
+    const vitest = [process.execPath, join(dir, "node_modules", "vitest", "vitest.mjs"), "run", ...task.tests, "--reporter=json", `--outputFile=${report}`];
+    const argv = sandboxed ? ["codex", ...CODEX_FLAGS, "-c", `sandbox_mode="${AGENT_SANDBOX_MODE}"`, "-c", "sandbox_workspace_write.writable_roots=[]", "-c", "sandbox_workspace_write.network_access=false", "sandbox", "--", ...vitest] : vitest;
     let text = "";
     codeRun = /** @type {NonNullable<Context["stream"]>} */ (ctx.stream)(argv, dir, (t) => (text = (text + t).slice(-20_000)));
     void codeRun.done.then(() => {
       codeRun = null;
-      const stubs = weekCode(ctx, dir, week).filter((t) => t.stubbed);
-      const results = taskResults(ctx.readText(report) ?? "", task, stubs);
+      const stubs = agentTaskList(dir, week).filter((t) => t.stubbed);
+      const results = taskResults(ctx.readText(report) ?? "", task, stubs, task.needs, sandboxed);
       try {
         rmSync(report, { force: true });
       } catch {
         // a leftover report in the temp folder is harmless
       }
-      if (!results) code = { ...code, [id]: { phase: "error", error: `The tests couldn't run:\n${cleanOutput(text).slice(-1500)}` } };
-      else code = { ...code, [id]: { phase: results.failed ? "failed" : "passed", ...results } };
+      if (!results) {
+        // The sandbox couldn't run them: leave it to the student's press, with no verdict.
+        if (sandboxed) {
+          code = { ...code };
+          delete code[id];
+          if (!quiet) agent.testOffer(week, id);
+          publish();
+          return then(false);
+        }
+        code = { ...code, [id]: { phase: "error", error: `The tests couldn't run:\n${cleanOutput(text).slice(-1500)}` } };
+      } else code = { ...code, [id]: { phase: results.failed ? "failed" : "passed", rev: task.rev, ...results } };
+      if (quiet) {
+        publish();
+        return then(Boolean(results && !results.failed && results.passed > 0));
+      }
+      if (from && results) {
+        const todo = results.waiting.length ? ` ${results.waiting.join(", ")} still to do.` : "";
+        const socket = results.blocked ? ` ${results.blocked} more open a local socket, so they need Run its tests.` : "";
+        if (results.failed) agent.say("bad", `\`${id}\`: ${results.failed} of its tests fail. First: ${results.failures[0]?.test ?? ""}: ${String(results.failures[0]?.message ?? "").split("\n")[0].slice(0, 300)}`);
+        else if (results.blocked && !results.passed) agent.testOffer(week, id, `\`${id}\`: its tests open a local socket, so they can't run in the sandbox.${todo}`);
+        else agent.commitOffer(week, id, `\`${id}\`: ${results.passed} test${results.passed === 1 ? "" : "s"} pass.${todo}${socket}`);
+      } else if (from) agent.say("bad", `The tests for \`${id}\` couldn't run.`);
       publish();
+      then(Boolean(results && !results.failed));
     });
-    return { ...ok, rev: saved.rev };
   }
 
-  /** The commit for one task, once its tests pass: only that task's file. @param {Record<string, unknown>} a */
+  /**
+   * Where the student is in the Build view: each step's own tests, in order, in the sandbox, until the
+   * first that isn't green. A step already checked at the same version of its code isn't run again.
+   * @param {Record<string, unknown>} a
+   */
+  function buildCheck(a) {
+    const dir = ctx.state.repoDir;
+    const week = Number(a.week);
+    if (!dir || !Number.isInteger(week) || !weekIn(week)) return reject(409, "That week isn't in your work yet.");
+    if (checking) return ok;
+    if (codeRun) {
+      // Tests already running (the agent's turn just ended): check once they finish.
+      if (!checkQueued) {
+        checkQueued = true;
+        void codeRun.done.then(() => setTimeout(() => ((checkQueued = false), buildCheck(a)), 0));
+      }
+      return ok;
+    }
+    const tasks = agentTaskList(dir, week);
+    const steps = buildSteps(ctx, dir, week, tasks).filter((st) => st.found);
+    checking = true;
+    const next = (/** @type {number} */ i) => {
+      const st = steps[i];
+      if (!st) return void (checking = false);
+      if (st.committed) return next(i + 1);
+      if (st.testNote) return void (checking = false); // no test checks it: the student says when it's done
+      const task = tasks.find((t) => t.id === st.id && t.week === st.week) ?? tasks.find((t) => t.id === st.id);
+      if (!task) return void (checking = false);
+      const known = code[task.id];
+      if (known?.rev === task.rev && known.phase === "passed") return next(i + 1);
+      if (known?.rev === task.rev && known.phase === "failed") return void (checking = false);
+      runTaskTests(dir, task.week, task, "check", (green) => (green ? next(i + 1) : void (checking = false)));
+    };
+    next(0);
+    return ok;
+  }
+
+  /** The commit for one task, once its tests pass as the file is now: only that task's file. @param {Record<string, unknown>} a */
   function commitCode(a) {
     const dir = ctx.state.repoDir;
     const week = Number(a.week);
     if (!dir || !Number.isInteger(week) || !weekIn(week)) return reject(409, "That week isn't in your work yet.");
     const task = weekCode(ctx, dir, week).find((t) => t.id === a.id);
-    if (!task || code[task.id]?.phase !== "passed") return reject(409, "Commit a task once its tests pass.");
+    // A task no test checks yet (the guide says "Test: none yet") is committed once it's written.
+    const untested = Boolean(task && !task.stubbed && task.needs && !Object.values(task.needs).some((ids) => ids.includes(task.id)));
+    if (!task || (code[task.id]?.phase !== "passed" && !untested)) return reject(409, "Commit a task once its tests pass.");
+    if (!untested && code[task.id]?.rev !== task.rev) return reject(409, "This task changed after its tests ran: run them again first.");
+    // Once is enough: a second press would commit whatever else is in the file by then, under this task's name.
+    if (code[task.id]?.done && code[task.id]?.rev === task.rev) return reject(409, "This task is already committed.");
     const message = `week ${week}: ${task.id}`;
     const r = ctx.capture(["git", "commit", "-q", "-m", message, "--", task.file], dir);
     const said = `${r?.stdout ?? ""}${r?.stderr ?? ""}`;
-    code = { ...code, [task.id]: { ...code[task.id], committed: r?.code === 0 ? `Committed: ${message}` : /nothing (added )?to commit|no changes added/i.test(said) ? "Nothing new to commit: it's already in a commit." : `The commit didn't work: ${said.trim().split("\n")[0]}` } };
+    const committed = r?.code === 0 ? `Committed: ${message}` : /nothing (added )?to commit|no changes added/i.test(said) ? "Nothing new to commit: it's already in a commit." : `The commit didn't work: ${said.trim().split("\n")[0]}`;
+    code = { ...code, [task.id]: { ...(code[task.id] ?? { phase: "passed" }), rev: task.rev, committed, done: r?.code === 0 || /already in a commit/.test(committed) } };
+    agent.commitDone(task.id);
     publish();
-    return ok;
+    return { ...ok, said: committed };
   }
+
+  /**
+   * A turn on a selected task ended: the studio decides green itself from the measured tests,
+   * whichever command Codex happened to run. It runs them inside Codex's sandbox, because nobody has
+   * pressed anything yet, so agent-written code doesn't run outside it by itself.
+   * @param {{ taskId: unknown, status: string }} done
+   * @param {number} week
+   */
+  function onAgentTurnDone({ taskId, status }, week = 0) {
+    const dir = ctx.state.repoDir;
+    if (!dir || status !== "completed" || !taskId || !week) return;
+    const task = agentTaskList(dir, week).find((t) => t.id === taskId);
+    if (!task || task.stubbed) return;
+    if (codeRun || !ctx.stream) return agent.testOffer(task.week, task.id);
+    runTaskTests(dir, task.week, task, "sandbox");
+  }
+
+  /** The tasks the Agent tab can work on: this week's first, then earlier weeks' (a class may reach back). @param {string} dir @param {number} week */
+  const agentTaskList = (dir, week) => {
+    const out = [];
+    // This week's first, then earlier weeks', then later ones (a class can reach either way, and
+    // later weeks' code may be in the folder already).
+    const order = [week, ...Array.from({ length: week - 1 }, (_, i) => week - 1 - i), ...Array.from({ length: Math.max(0, 9 - week) }, (_, i) => week + 1 + i)];
+    for (const w of order) out.push(...weekCode(ctx, dir, w).map((t) => ({ ...t, week: w })));
+    return out;
+  };
+  const agent = createAgent(ctx, {
+    ...(options.agentTransport ? { transport: options.agentTransport } : {}),
+    afterTurn: (done) => onAgentTurnDone(done, done.week),
+    emit: (e) => {
+      for (const l of listeners) l("agent", e);
+    },
+    weekTasks: (dir, week) => agentTaskList(dir, week),
+    weekTitle: (week) => (meta.groups ?? []).find((g) => g.week === week)?.title ?? `Week ${week}`,
+  });
 
   /** @param {number} week */
   async function runChecks(week) {
     const dir = ctx.state.repoDir;
     const g = (meta.groups ?? []).find((x) => x.week === week);
-    if (!dir || !g || !(["setup", "done", "inwork"].includes(g.status) || (g.status === "get" && current >= steps.length))) return reject(409, "That week isn't in your work yet.");
+    if (!dir || !g || !(["setup", "done", "inwork", "open"].includes(g.status) || (g.status === "get" && current >= steps.length))) return reject(409, "That week isn't in your work yet.");
     if (checksRun) return reject(409, "The checks are already running.");
     checks = { week, phase: "running", out: "" };
     publish();
@@ -2447,7 +2652,14 @@ export function createStudio(ctx, steps, meta = {}) {
       return ok;
     }
     if (a.type === "checks") return runChecks(Number(a.week));
+    if (typeof a.type === "string" && a.type.startsWith("agent-")) {
+      // Only for a week in the student's work, the same as its page and checks.
+      if (a.type === "agent-send" && !weekIn(Number(a.week))) return reject(409, "That week isn't in your work yet.");
+      return agent.act(a);
+    }
     if (a.type === "code-save") return saveCode(a);
+    if (a.type === "code-test") return testCode(a);
+    if (a.type === "build-check") return buildCheck(a);
     if (a.type === "code-commit") return commitCode(a);
     if (typeof a.type === "string" && a.type.startsWith("account-")) return accountAct(a);
     if (acct) return reject(409, "Finish changing the GitHub account first, or close it.");
@@ -2749,7 +2961,7 @@ export function createStudio(ctx, steps, meta = {}) {
      */
     weekPage: (week) => {
       const g = (meta.groups ?? []).find((x) => x.week === week);
-      const isIn = g && (["setup", "done", "inwork"].includes(g.status) || (g.status === "get" && current >= steps.length));
+      const isIn = g && (["setup", "done", "inwork", "open"].includes(g.status) || (g.status === "get" && current >= steps.length));
       const dir = ctx.state.repoDir;
       if (!isIn || !dir) return null;
       for (const rel of [g.page, g.guide ?? `docs/weeks/week-${pad2(week)}.md`]) {
@@ -2768,14 +2980,30 @@ export function createStudio(ctx, steps, meta = {}) {
       // week is in the student's work, as always.
       if (ctx.state.repoDir) return null;
       const g = (meta.groups ?? []).find((x) => x.week === week);
-      if (!g || !["setup", "done", "inwork", "get"].includes(g.status)) return null;
+      if (!g || !["setup", "done", "inwork", "get", "open"].includes(g.status)) return null;
       for (const rel of [g.page, g.guide ?? `docs/weeks/week-${pad2(week)}.md`]) if (rel && /^docs\/weeks\/week-\d{2}\.(html|md)$/.test(rel)) return rel;
       return null;
     },
     /** The course folder, once there is one. */
     repoDir: () => ctx.state.repoDir ?? null,
     /** Tests the studio started are running (a task's save, or the week's checks). */
-    busy: () => Boolean(codeRun || checksRun),
+    busy: () => Boolean(codeRun || checksRun || agent.busy()),
+    /** The picker's list in the Agent tab, once the week is in the student's work. @param {number} week */
+    agentTasks: (week) => {
+      const dir = ctx.state.repoDir;
+      if (!dir || !weekIn(week)) return null;
+      return agentTaskList(dir, week).map((t) => ({ id: t.id, week: t.week, description: t.description }));
+    },
+    /** The Build tab's steps for a week, from its guide, each with where its task stands. @param {number} week */
+    buildSteps: (week) => {
+      const dir = ctx.state.repoDir;
+      if (!dir || !weekIn(week)) return null;
+      return buildSteps(ctx, dir, week, agentTaskList(dir, week));
+    },
+    /** The Agent tab's state: a snapshot; numbered "agent" events follow it. */
+    agentSnapshot: () => agent.snapshot(),
+    /** Ends what the studio started and waits, boundedly, for its Codex to go. */
+    shutdown: () => agent.shutdown(),
     /**
      * A week's tasks to write in the studio (its Code tab), once the week is in the student's work.
      * @param {number} week
@@ -2792,6 +3020,890 @@ export function createStudio(ctx, steps, meta = {}) {
       child = null;
       checksRun?.kill();
       stopBoard();
+    },
+  };
+}
+
+// ── The Agent tab: the student's own Codex, driven from the studio ──────────────────
+// Node owns one `codex app-server` child (newline-delimited JSON-RPC on stdio), one thread per
+// course folder and one turn at a time. The browser never sees raw RPC: it gets a snapshot plus
+// numbered events, and can only ask for the few actions below. Written against the public protocol
+// (generate its types with `codex app-server generate-ts`); checked on 0.166.0.
+
+/**
+ * The command for only this task's own tests: from the measured map, those that need just this task.
+ * Their shared start of a name if nothing else in those files has it, else their names; without
+ * measured data, the task's test files.
+ * @param {{ id: string, tests: string[], needs?: Record<string, string[]> | null }} task
+ */
+export function focusedTestCommand(task) {
+  const quote = (/** @type {string} */ t) => `"${t.replace(/[\\"$\`]/g, "\\$&")}"`;
+  const regex = (/** @type {string} */ t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const entries = Object.entries(task.needs ?? {});
+  const own = entries.filter(([, ids]) => ids.length === 1 && ids[0] === task.id).map(([key]) => key);
+  if (!own.length) return `npx vitest run ${task.tests.join(" ")}`;
+  const files = [...new Set(own.map((k) => k.split(" > ")[0]))];
+  const names = own.map((k) => k.slice(k.indexOf(" > ") + 3));
+  let prefix = names[0];
+  for (const n of names) while (!n.startsWith(prefix)) prefix = prefix.slice(0, -1);
+  prefix = /^(.*\s)/.exec(prefix)?.[1] ?? (names.length === 1 ? prefix : "");
+  const others = entries.map(([key]) => key).filter((k) => !own.includes(k) && files.includes(k.split(" > ")[0])).map((k) => k.slice(k.indexOf(" > ") + 3));
+  if (names.length === 1) prefix = names[0];
+  const pattern = prefix.length >= 4 && !others.some((n) => n.startsWith(prefix)) ? `^${regex(prefix)}` : names.map(regex).join("|");
+  return pattern.length > 600 ? `npx vitest run ${files.join(" ")}` : `npx vitest run ${files.join(" ")} -t ${quote(pattern)}`;
+}
+
+/** The oldest Codex the bridge has been run against. Older ones get the update command. */
+export const CODEX_MIN_VERSION = "0.166.0";
+const CODEX_UPDATE = "npm install -g @openai/codex@latest";
+const CODEX_INSTALL = "npm install -g @openai/codex";
+/** The permissions every thread and turn asks for explicitly, never inherited from the student's config. */
+export const AGENT_APPROVAL_POLICY = "on-request";
+export const AGENT_SANDBOX_MODE = "workspace-write";
+export const AGENT_SANDBOX_POLICY = { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
+export const AGENT_PERMISSIONS_LINE = "Without asking, Codex can read files on your laptop and change files and run commands in your course folder. It asks here before using the internet (the course's bus tests count), changing anything else outside that folder (temporary folders aside) or making a git commit.";
+/**
+ * Overrides for the student's config.toml on every thread, so the line above stays true whatever it
+ * says: no extra writable folders, no network, and no tools that act without a card (web search and
+ * sub-agents have no approval path here).
+ */
+export const AGENT_CONFIG = { sandbox_workspace_write: { writable_roots: [], network_access: false }, web_search: "disabled", features: { multi_agent: false } };
+/** Studio's teaching policy, as trusted instructions for the thread. The course's rules are in the repo's AGENTS.md. */
+export const AGENT_POLICY = `You are working with a student inside NetSim Studio, on their own copy of the NetSim course. The repo's AGENTS.md has the course's rules. Each message may start with a <studio-context> block from the studio: the week, the selected task and its focused test command.
+- The student leads. If the message already names an approach, use it; ask for their approach only when it doesn't. Also: when the <studio-context> says "Guided step", the course's prompt is the approach they chose: don't ask, go ahead.
+- Before each change, say in a sentence or two what you'll change and why. Stay inside the selected task. You may write the code; they must be able to explain it, so explain it.
+- After a change, run the task's focused test command and read the result with them.
+- Ask before moving on to a different task. Never edit tests.
+- Don't open or copy from studio/hints/: those are the course's answers for the grey hints in the app.
+- A test failing with "listen EPERM" is the sandbox blocking its local socket, not their code: ask to run it again outside the sandbox and say why.`;
+
+const RPC_TIMEOUT_MS = { initialize: 5 * 60_000, default: 60_000 };
+const AGENT_MAX_ENTRIES = 400;
+const AGENT_MAX_TEXT = 200_000;
+const AGENT_MAX_OUTPUT = 20_000;
+const AGENT_MAX_MESSAGE = 20_000;
+const AGENT_MAX_LINE = 32 * 1024 * 1024;
+
+/** @param {string} a @param {string} b  is version a older than b? */
+export function versionOlder(a, b) {
+  const parts = (/** @type {string} */ v) => v.split(/[.-]/).slice(0, 3).map((p) => Number.parseInt(p, 10) || 0);
+  const [x, y] = [parts(a), parts(b)];
+  for (let i = 0; i < 3; i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) < (y[i] ?? 0);
+  return false;
+}
+
+/**
+ * A running `codex app-server`: JSON messages in and out, and a bounded way to end it (only this
+ * child and what it started).
+ * @typedef {{ send: (message: object) => void, onMessage: (fn: (message: any) => void) => void, onBadLine: (fn: (line: string) => void) => void, onClose: (fn: (why: { code: number | null, signal: string | null, error?: string, stderr: string }) => void) => void, stop: (graceMs?: number) => Promise<void> }} AgentTransport
+ */
+
+/**
+ * @param {Context} ctx
+ * @param {string} cwd
+ * @returns {AgentTransport}
+ */
+export function codexTransport(ctx, cwd) {
+  const windows = ctx.platform === "windows";
+  // Fixed arguments only: nothing the student types ever goes on this command line, so the Windows
+  // shim's shell sees nothing of theirs. Their words go over stdio.
+  const child = spawn("codex", [...CODEX_FLAGS, "app-server"], { cwd, env: { ...process.env, NO_COLOR: "1" }, stdio: ["pipe", "pipe", "pipe"], shell: windows, detached: !windows, windowsHide: true });
+  /** @type {(message: any) => void} */
+  let message = () => {};
+  /** @type {(line: string) => void} */
+  let bad = () => {};
+  /** @type {(why: { code: number | null, signal: string | null, error?: string, stderr: string }) => void} */
+  let closed = () => {};
+  let buffer = "";
+  let stderr = "";
+  let done = false;
+  /** @type {(() => void)[]} */
+  const waiters = [];
+  const finish = (/** @type {number | null} */ code, /** @type {string | null} */ signal, /** @type {string | undefined} */ error) => {
+    if (done) return;
+    done = true;
+    closed({ code, signal, ...(error ? { error } : {}), stderr });
+    for (const w of waiters) w();
+  };
+  const signalTree = (/** @type {NodeJS.Signals} */ signal) => {
+    if (child.pid === undefined) return;
+    try {
+      if (windows) spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      else process.kill(-child.pid, signal);
+    } catch {
+      // already gone
+    }
+  };
+  child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    buffer += chunk;
+    if (buffer.length > AGENT_MAX_LINE) {
+      buffer = "";
+      bad("(a message too long to read)");
+      return;
+    }
+    for (let at = buffer.indexOf("\n"); at >= 0; at = buffer.indexOf("\n")) {
+      const line = buffer.slice(0, at).trim();
+      buffer = buffer.slice(at + 1);
+      if (!line) continue;
+      /** @type {unknown} */
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        bad(line);
+        continue;
+      }
+      message(parsed);
+    }
+  });
+  child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr = (stderr + chunk).slice(-4000)));
+  child.stdin.on("error", () => {}); // a write after it died: the close below says so
+  child.on("error", (error) => finish(null, null, /** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT" ? "ENOENT" : error.message));
+  child.on("close", (code, signal) => finish(code, signal));
+  return {
+    send: (m) => {
+      if (!done) child.stdin.write(`${JSON.stringify(m)}\n`);
+    },
+    onMessage: (fn) => (message = fn),
+    onBadLine: (fn) => (bad = fn),
+    onClose: (fn) => (closed = fn),
+    // End of stdin asks it to leave, and it ends the commands it started (they're in their own
+    // sessions, out of reach of a signal to this group: measured on 0.166.0). Then a bounded wait,
+    // then this child's group in case it hung.
+    stop: (graceMs = 2500) =>
+      new Promise((resolve) => {
+        if (done) return resolve();
+        waiters.push(resolve);
+        child.stdin.end();
+        const term = setTimeout(() => signalTree("SIGTERM"), graceMs * 0.8);
+        const kill = setTimeout(() => {
+          signalTree("SIGKILL");
+          setTimeout(resolve, 200);
+        }, graceMs);
+        waiters.push(() => {
+          clearTimeout(term);
+          clearTimeout(kill);
+        });
+      }),
+  };
+}
+
+/** What an approval is about, in a form that changes when any of it changes. @param {string} method @param {any} params @param {unknown} changes */
+function approvalFingerprint(method, params, changes) {
+  const rest = { ...(params ?? {}) };
+  delete rest.startedAtMs;
+  return createHash("sha256").update(JSON.stringify([method, rest, changes ?? null])).digest("hex").slice(0, 24);
+}
+
+/**
+ * The bridge. Everything about the child, the thread, the turn and the pending approvals lives here,
+ * so a browser refresh only re-reads it.
+ * @param {Context} ctx
+ * @param {{ transport?: (cwd: string) => AgentTransport, emit?: (event: object) => void, weekTasks?: (dir: string, week: number) => { id: string, file: string, description: string, tests: string[] }[], weekTitle?: (week: number) => string, stopWaitMs?: number, afterTurn?: (done: { week: number, taskId: unknown, status: string, commands: { command: string, exitCode: unknown, status: string, output: string }[] }) => void }} [options]
+ */
+export function createAgent(ctx, { transport = (cwd) => codexTransport(ctx, cwd), emit = () => {}, weekTasks = () => [], weekTitle = (week) => `Week ${week}`, stopWaitMs = 15_000, afterTurn = () => {} } = {}) {
+  /** @type {"off" | "starting" | "missing" | "too-old" | "signed-out" | "signing-in" | "ready" | "failed" | "unavailable"} */
+  let phase = "off";
+  let seq = 0;
+  let generation = 0;
+  let version = "";
+  /** @type {{ type: string, email?: string | null, planType?: string } | null} */
+  let account = null;
+  let problem = "";
+  let loginUrl = "";
+  /** @type {AgentTransport | null} */
+  let link = null;
+  let threadId = "";
+  /** @type {{ id: string, status: "starting" | "running" | "stopping" } | null} */
+  let turn = null;
+  /** @type {{ phase: "running" | "failed", out: string, display: string } | null} */
+  let fix = null;
+  /** @type {{ id: string, kind: string, [key: string]: unknown }[]} */
+  let entries = [];
+  /**
+   * The approvals waiting for the student. Each answer has to name all of this, so a card from
+   * another process, turn or item, or one whose content changed, can't authorize anything.
+   * @type {{ key: string, generation: number, threadId: string, turnId: string, itemId: string, approvalId: string, requestId: number | string, method: string, fingerprint: string, kind: "command" | "file", command: string, cwd: string, reason: string, grantRoot: string, changes: { path: string, kind: string, diff: string, movePath?: string }[] }[]}
+   */
+  let cards = [];
+  let nextRpc = 1;
+  /** @type {Map<number, { resolve: (value: any) => void, reject: (error: Error) => void, timer: NodeJS.Timeout, method: string }>} */
+  const rpcs = new Map();
+  let notedHints = false;
+  let lastClientId = "";
+  let noteId = 0;
+  /** @type {NodeJS.Timeout | null} */
+  let stopTimer = null;
+  let shuttingDown = false;
+  /** @type {Set<string>} commands the student's Stop ended: they read "stopped", whatever Codex reports after */
+  const stoppedRows = new Set();
+  let runsLater = ""; // what warnIfRunsLater last said
+  let lastWeek = 0; // the week and task of the message being answered
+  /** @type {unknown} */
+  let lastTask = "";
+  let closingOnPurpose = false; // the child is being ended because it's too old: keep saying that
+
+  const repo = () => {
+    const dir = ctx.state.repoDir;
+    if (!dir) return null;
+    try {
+      return realpathSync(dir);
+    } catch {
+      return null;
+    }
+  };
+  const fail = (/** @type {number} */ status, /** @type {string} */ error) => ({ ok: false, status, error });
+  const good = { ok: true, status: 200, error: "" };
+
+  /** The non-transcript part of the state. */
+  const stateNow = () => ({
+    phase,
+    generation,
+    version,
+    minVersion: CODEX_MIN_VERSION,
+    account: account && { type: account.type, ...(account.email ? { email: account.email } : {}), ...(account.planType ? { planType: account.planType } : {}) },
+    problem,
+    loginUrl,
+    threadId,
+    turn: turn && { id: turn.id, status: turn.status },
+    fix,
+    fixCommand: phase === "missing" ? CODEX_INSTALL : phase === "too-old" ? CODEX_UPDATE : "",
+    cards: cards.map((c) => ({ key: c.key, kind: c.kind, command: c.command, cwd: c.cwd, reason: c.reason, grantRoot: c.grantRoot, changes: c.changes })),
+    permissions: AGENT_PERMISSIONS_LINE,
+  });
+  const snapshot = () => ({ seq, ...stateNow(), entries });
+  const event = (/** @type {object} */ e) => emit({ seq: ++seq, ...e });
+  const publishState = () => event({ type: "state", state: stateNow() });
+
+  /** @param {{ id: string, kind: string, [key: string]: unknown }} entry */
+  function put(entry) {
+    const at = entries.findIndex((x) => x.id === entry.id);
+    if (at >= 0) entries[at] = { ...entries[at], ...entry };
+    else {
+      entries.push(entry);
+      if (entries.length > AGENT_MAX_ENTRIES) entries = entries.slice(-AGENT_MAX_ENTRIES);
+    }
+    event({ type: "entry", entry: at >= 0 ? entries[at] : entry });
+  }
+  const note = (/** @type {"info" | "bad"} */ tone, /** @type {string} */ text) => put({ id: `note-${++noteId}`, kind: "note", tone, text });
+
+  // ── RPC ──
+  /** @param {string} method @param {unknown} params @returns {Promise<any>} */
+  function rpc(method, params) {
+    const current = link;
+    if (!current) return Promise.reject(new Error("Codex isn't running."));
+    const id = nextRpc++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        rpcs.delete(id);
+        const err = /** @type {Error & { ambiguous?: boolean }} */ (new Error(`Codex didn't answer ${method} in time.`));
+        err.ambiguous = true;
+        reject(err);
+      }, method === "initialize" ? RPC_TIMEOUT_MS.initialize : RPC_TIMEOUT_MS.default);
+      rpcs.set(id, { resolve, reject, timer, method });
+      current.send({ id, method, params });
+    });
+  }
+
+  /** @param {any} m */
+  function onMessage(m) {
+    if (m === null || typeof m !== "object") return;
+    if (m.id !== undefined && m.method === undefined) {
+      const waiting = typeof m.id === "number" ? rpcs.get(m.id) : undefined;
+      if (!waiting) return;
+      rpcs.delete(m.id);
+      clearTimeout(waiting.timer);
+      if (m.error) waiting.reject(new Error(String(m.error.message ?? "Codex refused that.")));
+      else waiting.resolve(m.result);
+      return;
+    }
+    if (typeof m.method !== "string") return;
+    if (m.id !== undefined) return onServerRequest(m.id, m.method, m.params ?? {});
+    onNotification(m.method, m.params ?? {});
+  }
+
+  // ── Approvals ──
+  const cardKey = (/** @type {{ generation: number, threadId: string, turnId: string, itemId: string, approvalId: string, requestId: number | string, fingerprint: string }} */ c) =>
+    [c.generation, c.threadId, c.turnId, c.itemId, c.approvalId, c.requestId, c.fingerprint].join("|");
+  /** A path as the student knows it: inside the course folder, relative to it. @param {string} p */
+  const shortPath = (p) => {
+    const dir = repo();
+    return dir && p.startsWith(`${dir}/`) ? p.slice(dir.length + 1) : p;
+  };
+  const fileChanges = (/** @type {unknown} */ changes) =>
+    (Array.isArray(changes) ? changes : []).map((c) => ({
+      path: shortPath(String(c?.path ?? "")),
+      kind: String(typeof c?.kind === "object" ? (c.kind?.type ?? "update") : (c?.kind ?? "update")),
+      diff: String(c?.diff ?? "").slice(0, AGENT_MAX_OUTPUT),
+      ...(c?.kind?.move_path ? { movePath: String(c.kind.move_path) } : {}),
+    }));
+
+  /** @param {number | string} id @param {string} method @param {any} params */
+  function onServerRequest(id, method, params) {
+    const current = link;
+    if (!current) return;
+    if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
+      // Another thread's request (one this studio didn't start), or no turn of ours: no.
+      if (params.threadId !== threadId || !turn || (turn.id && params.turnId !== turn.id)) {
+        current.send({ id, result: { decision: "decline" } });
+        return note("info", "Codex asked for an approval outside this conversation's current turn, so it was declined.");
+      }
+      const kind = method === "item/commandExecution/requestApproval" ? "command" : "file";
+      const itemId = String(params.itemId ?? "");
+      const approvalId = String(params.approvalId ?? "");
+      const entry = entries.find((x) => x.id === itemId);
+      const changes = kind === "file" ? (/** @type {{ path: string, kind: string, diff: string, movePath?: string }[]} */ (entry?.changes) ?? []) : [];
+      // A card must show everything Approve would grant. Anything it can't: no, and say so.
+      const hidden =
+        kind === "command"
+          ? params.kind !== undefined && params.kind !== "command"
+            ? "typing into a running command"
+            : params.additionalPermissions
+              ? "extra permissions"
+              : params.networkApprovalContext
+                ? "network access to a host"
+                : ""
+          : changes.length === 0
+            ? "a file change it didn't list"
+            : "";
+      if (hidden) {
+        current.send({ id, result: { decision: "decline" } });
+        return note("info", `Codex asked to approve ${hidden}, which the studio can't show on a card, so it was declined.`);
+      }
+      const fingerprint = approvalFingerprint(method, params, changes);
+      // A new request for the same item replaces its card: the old one can't be answered any more.
+      for (const old of cards.filter((c) => c.itemId === itemId && c.approvalId === approvalId && c.requestId !== id)) current.send({ id: old.requestId, result: { decision: "decline" } });
+      cards = cards.filter((c) => !(c.itemId === itemId && c.approvalId === approvalId));
+      const base = { generation, threadId, turnId: String(params.turnId ?? ""), itemId, approvalId, requestId: id, fingerprint };
+      cards.push({
+        ...base,
+        key: cardKey(base),
+        method,
+        kind,
+        command: String(params.command ?? entry?.command ?? ""),
+        cwd: String(params.cwd ?? ""),
+        reason: String(params.reason ?? ""),
+        grantRoot: String(params.grantRoot ?? ""),
+        changes,
+      });
+      return publishState();
+    }
+    // Everything else the studio can't show (MCP forms, extra permissions, the older approval
+    // messages, questions): a clear no, so the turn doesn't hang, and the student hears about it.
+    if (method === "applyPatchApproval" || method === "execCommandApproval") current.send({ id, result: { decision: "denied" } });
+    else current.send({ id, error: { code: -32601, message: "NetSim Studio doesn't support this request." } });
+    note("info", `Codex asked for something the studio can't show here (${method.slice(0, 80)}), so it was declined.`);
+  }
+
+  /**
+   * The student's answer to one card. It must name the exact card; once answered, replaced, or from
+   * an earlier process, thread or turn, it's refused and nothing reaches Codex.
+   * @param {Record<string, unknown>} a
+   */
+  function answer(a) {
+    if (a.decision !== "accept" && a.decision !== "decline") return fail(400, "That isn't an answer the studio knows.");
+    const card = cards.find((c) => c.key === a.key);
+    if (!card || card.generation !== generation || card.threadId !== threadId || !turn) return fail(409, "That approval is out of date: Codex isn't waiting for it any more.");
+    if (turn.id && card.turnId !== turn.id) return fail(409, "That approval is from an earlier turn.");
+    if (!link) return fail(409, "Codex isn't running.");
+    cards = cards.filter((c) => c !== card);
+    link.send({ id: card.requestId, result: { decision: a.decision } });
+    publishState();
+    return good;
+  }
+
+  // ── The conversation, from Codex's items ──
+  /** @param {any} item @param {boolean} [finished] */
+  function putItem(item, finished = false) {
+    if (!item || typeof item.id !== "string") return;
+    const id = item.id;
+    if (item.type === "agentMessage") {
+      put({ id, kind: "agent", text: String(item.text ?? (entries.find((x) => x.id === id)?.text ?? "")).slice(-AGENT_MAX_TEXT), done: finished });
+    } else if (item.type === "commandExecution") {
+      const output = item.aggregatedOutput ?? entries.find((x) => x.id === id)?.output ?? "";
+      put({ id, kind: "command", command: String(item.command ?? ""), status: stoppedRows.has(id) ? "stopped" : String(item.status ?? ""), output: String(output).slice(-AGENT_MAX_OUTPUT), exitCode: item.exitCode ?? null });
+      if (/studio[\\/]hints/.test(String(item.command ?? "")) && !notedHints) {
+        notedHints = true;
+        note("info", "Codex opened the course's hints file (studio/hints). The course asks it not to copy answers from there: check you can explain what it writes.");
+      }
+    } else if (item.type === "fileChange") {
+      const changes = fileChanges(item.changes);
+      put({ id, kind: "file", changes, status: String(item.status ?? "") });
+    } else if (item.type === "webSearch") {
+      put({ id, kind: "note", tone: "info", text: "Codex searched the web." });
+    } else if (item.type === "mcpToolCall" || item.type === "dynamicToolCall") {
+      put({ id, kind: "note", tone: "info", text: `Codex used a tool: ${String(item.tool ?? "").slice(0, 80)}.` });
+    }
+  }
+
+  /** @param {string} method @param {any} params */
+  function onNotification(method, params) {
+    if (method === "account/login/completed") {
+      loginUrl = "";
+      if (!params.success) problem = String(params.error ?? "Signing in didn't finish.");
+      void readAccount();
+      return;
+    }
+    if (method === "account/updated") {
+      if (phase === "signed-out" || phase === "signing-in") void readAccount();
+      return;
+    }
+    if (params.threadId !== undefined && params.threadId !== threadId) return;
+    switch (method) {
+      case "turn/started":
+        if (turn && !turn.id && params.turn?.id) {
+          turn.id = String(params.turn.id);
+          if (turn.status === "starting") turn.status = "running";
+          publishState();
+        }
+        return;
+      case "item/started":
+      case "item/completed":
+        if (turn && params.turnId && turn.id && params.turnId !== turn.id) return;
+        return putItem(params.item, method === "item/completed");
+      case "item/agentMessage/delta": {
+        const id = String(params.itemId ?? "");
+        const entry = entries.find((x) => x.id === id);
+        if (!entry) put({ id, kind: "agent", text: "", done: false });
+        const target = /** @type {{ text: string }} */ (/** @type {unknown} */ (entries.find((x) => x.id === id)));
+        target.text = (target.text + String(params.delta ?? "")).slice(-AGENT_MAX_TEXT);
+        return event({ type: "delta", id, field: "text", text: String(params.delta ?? "") });
+      }
+      case "item/commandExecution/outputDelta": {
+        const id = String(params.itemId ?? "");
+        const entry = /** @type {{ output?: string } | undefined} */ (entries.find((x) => x.id === id));
+        if (!entry) return;
+        entry.output = `${entry.output ?? ""}${String(params.delta ?? "")}`.slice(-AGENT_MAX_OUTPUT);
+        return event({ type: "delta", id, field: "output", text: String(params.delta ?? "") });
+      }
+      case "item/fileChange/patchUpdated": {
+        const id = String(params.itemId ?? "");
+        const changes = fileChanges(params.changes);
+        put({ id, kind: "file", changes, status: String(entries.find((x) => x.id === id)?.status ?? "inProgress") });
+        // The patch changed under a pending card: it gets a new key, so the old answer is refused.
+        cards = cards.map((c) => {
+          if (c.itemId !== id || c.kind !== "file") return c;
+          const fingerprint = approvalFingerprint(c.method, { itemId: id, threadId: c.threadId, turnId: c.turnId, reason: c.reason, grantRoot: c.grantRoot }, changes);
+          return { ...c, fingerprint, changes, key: cardKey({ ...c, fingerprint }) };
+        });
+        return publishState();
+      }
+      case "serverRequest/resolved":
+        if (cards.some((c) => c.requestId === params.requestId)) {
+          cards = cards.filter((c) => c.requestId !== params.requestId);
+          publishState();
+        }
+        return;
+      case "error":
+        if (params.willRetry) return note("info", `Codex hit a problem and is trying again: ${String(params.error?.message ?? "").slice(0, 300)}`);
+        return note("bad", planWords(params.error) ?? `Codex: ${String(params.error?.message ?? "something went wrong").slice(0, 500)}`);
+      case "turn/completed":
+        return onTurnDone(params.turn);
+      default:
+    }
+  }
+
+  /** Codex refusing for plan or usage reasons, in words a student can act on (null for anything else). @param {any} error */
+  function planWords(error) {
+    const info = JSON.stringify(error?.codexErrorInfo ?? "");
+    const text = `${info} ${String(error?.message ?? "")}`;
+    if (/usageLimit|usage limit|rate.?limit|quota/i.test(text)) return `You've reached your plan's Codex limit (${String(error?.message ?? "").slice(0, 200)}). The course uses ChatGPT Plus: upgrade to Plus at chatgpt.com, or wait until the limit resets, then send again.`;
+    if (/plan|subscription|upgrade|not (available|included)|unauthori[sz]ed|401|403/i.test(text)) return `Codex refused because of your ChatGPT account: ${String(error?.message ?? "").slice(0, 300)} The course needs a paid plan with Codex: upgrade at chatgpt.com, then send again.`;
+    return null;
+  }
+
+  /** @param {any} done */
+  function onTurnDone(done) {
+    if (!turn || (turn.id && done?.id && done.id !== turn.id)) return;
+    if (stopTimer) clearTimeout(stopTimer);
+    stopTimer = null;
+    cards = cards.filter((c) => c.turnId !== (done?.id ?? turn?.id));
+    if (done?.status === "failed") note("bad", planWords(done?.error) ?? `This turn failed: ${String(done?.error?.message ?? "Codex didn't say why.").slice(0, 500)}`);
+    else if (done?.status === "interrupted") {
+      note("info", "Stopped. Anything it had already changed is still in your folder.");
+      // Interrupting a turn leaves a command it started still running (measured on 0.166.0): end those too.
+      for (const e of entries.filter((x) => x.kind === "command" && x.status === "inProgress")) put({ ...e, status: "stopped" });
+      for (const e of entries) if (e.kind === "command" && e.status === "stopped") stoppedRows.add(e.id);
+      if (link && threadId) rpc("thread/backgroundTerminals/clean", { threadId }).catch(() => note("bad", "A command Codex started may still be running. It ends when the studio stops."));
+    }
+    // A row Codex never reported finished doesn't say "running" once the turn is over.
+    for (const e of entries.filter((x) => x.kind === "command" && x.status === "inProgress")) put({ ...e, status: "finished" });
+    turn = null;
+    warnIfRunsLater();
+    publishState();
+    // What ran in this turn: the entries since the student's last message.
+    const from = entries.findLastIndex((x) => x.kind === "user");
+    const commands = /** @type {any[]} */ (entries.slice(from + 1).filter((x) => x.kind === "command"));
+    afterTurn({ week: lastWeek, taskId: lastTask, status: String(done?.status ?? ""), commands });
+  }
+
+  /** Changes to files that later run outside the sandbox (the studio, npm scripts, tests): say so, once for each new state. */
+  function warnIfRunsLater() {
+    const dir = repo();
+    const changed = dir ? (ctx.capture(["git", "status", "--porcelain", "--", "setup.mjs", "package.json", "vitest.config.ts", "studio", "tests"], dir)?.stdout ?? "").trimEnd() : "";
+    if (changed && changed !== runsLater) note("info", `These changed, and they run outside the sandbox the next time you use the studio, npm or the tests. Check them first (git diff): ${changed.split("\n").map((l) => l.slice(3)).join(", ").slice(0, 300)}`);
+    runsLater = changed;
+  }
+
+  // ── Starting, signing in, the thread ──
+  async function readAccount() {
+    try {
+      const r = await rpc("account/read", { refreshToken: false });
+      account = r?.account ?? null;
+      if (account) {
+        problem = "";
+        loginUrl = "";
+        phase = "ready";
+        await resumeSaved();
+      } else if (r?.requiresOpenaiAuth === false) {
+        phase = "ready";
+        await resumeSaved();
+      } else if (phase !== "signing-in" || !loginUrl) phase = "signed-out";
+    } catch (error) {
+      phase = "failed";
+      problem = `Codex couldn't say who's signed in: ${/** @type {Error} */ (error).message}`;
+    }
+    publishState();
+  }
+
+  /** @param {{ code: number | null, signal: string | null, error?: string, stderr: string }} why */
+  function onClosed(why) {
+    const wasTurn = turn;
+    const before = phase;
+    link = null;
+    generation++;
+    for (const [, w] of rpcs) {
+      clearTimeout(w.timer);
+      const err = /** @type {Error & { ambiguous?: boolean }} */ (new Error("Codex stopped."));
+      err.ambiguous = true;
+      w.reject(err);
+    }
+    rpcs.clear();
+    cards = [];
+    turn = null;
+    threadId = ""; // a new child has to resume it (the saved id is kept)
+    if (stopTimer) clearTimeout(stopTimer);
+    stopTimer = null;
+    if (shuttingDown) return;
+    if (closingOnPurpose) {
+      closingOnPurpose = false;
+      return;
+    }
+    if (why.error === "ENOENT") {
+      phase = "missing";
+      problem = "Codex isn't installed, or this terminal can't find it.";
+    } else if (before === "starting" && /unrecognized subcommand|unexpected argument|invalid value/i.test(why.stderr)) {
+      phase = "too-old";
+      problem = "This Codex is too old for the studio: it has no app-server.";
+    } else {
+      phase = "failed";
+      problem = before === "starting" ? `Codex didn't start (${why.error ?? `exit ${why.code ?? why.signal}`}). ${why.stderr.split("\n").filter(Boolean).slice(-2).join(" ").slice(0, 400)}`.trim() : "Codex stopped. Start it again to carry on with this conversation.";
+    }
+    // Never sent again by itself: it may already have changed files.
+    if (wasTurn) note("bad", "Codex stopped during this turn, so it may have changed files before it stopped. Nothing was sent again: check your folder, then decide what to ask next.");
+    publishState();
+  }
+
+  /** Start the child (a browser opening the tab, or the student pressing Start again). */
+  async function open() {
+    if (ctx.dryRun) {
+      phase = "unavailable";
+      problem = "The agent doesn't run in a dry run.";
+      publishState();
+      return good;
+    }
+    if (phase === "starting" || (link && phase !== "failed")) return good;
+    if (link) {
+      // Failed with the child still up (it refused the permissions): start clean.
+      closingOnPurpose = true;
+      await link.stop();
+      link = null;
+    }
+    const dir = repo();
+    if (!dir) return fail(409, "The course folder isn't set up yet.");
+    if (!onPath(ctx, "codex")) {
+      phase = "missing";
+      problem = "Codex isn't installed, or this terminal can't find it.";
+      publishState();
+      return good;
+    }
+    phase = "starting";
+    problem = "";
+    publishState();
+    const t = transport(dir);
+    link = t;
+    t.onMessage(onMessage);
+    t.onBadLine((line) => note("bad", `Codex sent something the studio couldn't read: ${line.slice(0, 120)}`));
+    t.onClose(onClosed);
+    try {
+      const init = await rpc("initialize", { clientInfo: { name: "netsim_studio", title: "NetSim Studio", version: String(STUDIO_VERSION) }, capabilities: { experimentalApi: true, requestAttestation: false } }); // experimental: Stop needs thread/backgroundTerminals/clean
+      version = /\/(\d+\.\d+\.\d+[\w.-]*)/.exec(String(init?.userAgent ?? ""))?.[1] ?? "";
+      t.send({ method: "initialized" });
+      if (version && versionOlder(version, CODEX_MIN_VERSION)) {
+        phase = "too-old";
+        problem = `This Codex is ${version}; the studio needs ${CODEX_MIN_VERSION} or newer.`;
+        closingOnPurpose = true;
+        await t.stop();
+        link = null;
+        publishState();
+        return good;
+      }
+      await readAccount();
+    } catch (error) {
+      // onClosed has said what happened if the child died.
+      if (link === t) {
+        phase = "failed";
+        problem = /** @type {Error} */ (error).message;
+        publishState();
+      }
+    }
+    return good;
+  }
+
+  const threadParams = (/** @type {string} */ dir) => ({ cwd: dir, approvalPolicy: AGENT_APPROVAL_POLICY, approvalsReviewer: "user", sandbox: AGENT_SANDBOX_MODE, config: AGENT_CONFIG, developerInstructions: AGENT_POLICY });
+  /** Whether Codex really took the permissions asked for (a managed config can override them). @param {any} r */
+  const permissionsHeld = (r) => r?.approvalPolicy === AGENT_APPROVAL_POLICY && r?.sandbox?.type === AGENT_SANDBOX_POLICY.type && r?.approvalsReviewer === "user" && r?.sandbox?.networkAccess === false && Array.isArray(r?.sandbox?.writableRoots) && r.sandbox.writableRoots.length === 0;
+
+  const savedThreads = () => /** @type {Record<string, string>} */ (ctx.state.agentThreads ??= {});
+
+  /** Pick up this folder's saved conversation, if there is one. Nothing is sent. */
+  async function resumeSaved() {
+    const dir = repo();
+    if (!dir || threadId) return;
+    const saved = savedThreads()[dir];
+    if (!saved) return;
+    try {
+      const r = await rpc("thread/resume", { threadId: saved, ...threadParams(dir) });
+      if (realpathOr(String(r?.cwd ?? r?.thread?.cwd ?? "")) !== dir) throw new Error("That conversation belongs to another folder.");
+      if (!permissionsHeld(r)) throw new Error("permissions");
+      threadId = saved;
+      if (!entries.length) {
+        for (const past of r?.thread?.turns ?? []) {
+          for (const item of past?.items ?? []) {
+            if (item?.type === "userMessage") {
+              const text = (item.content ?? []).filter((c) => c?.type === "text" && !String(c.text).startsWith("<studio-context>")).map((c) => c.text).join("\n");
+              if (text) put({ id: String(item.id), kind: "user", text });
+            } else putItem(item, true);
+          }
+          if (past?.status === "inProgress") note("info", "The last turn didn't finish before Codex stopped. It may have changed files; nothing was sent again.");
+        }
+      }
+    } catch (error) {
+      delete savedThreads()[dir];
+      ctx.save?.();
+      if (/** @type {Error} */ (error).message === "permissions") {
+        phase = "failed";
+        problem = permissionRefusal;
+        return;
+      }
+      note("info", "Couldn't pick up your earlier conversation, so the next message starts a new one.");
+    }
+  }
+  const permissionRefusal = "Codex's settings on this laptop overrode the permissions the studio asks for (workspace-write, ask on request), so the studio won't drive it. Ask Praise.";
+  const realpathOr = (/** @type {string} */ p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
+  };
+
+  /** @param {string} dir */
+  async function ensureThread(dir) {
+    if (threadId) return;
+    const r = await rpc("thread/start", threadParams(dir));
+    if (!permissionsHeld(r)) {
+      phase = "failed";
+      problem = permissionRefusal;
+      throw new Error(permissionRefusal);
+    }
+    threadId = String(r?.thread?.id ?? "");
+    if (!threadId) throw new Error("Codex didn't start a conversation.");
+    savedThreads()[dir] = threadId;
+    ctx.save?.();
+  }
+
+  /**
+   * What the studio tells the agent about where the student is: from its own list of the week's
+   * tasks, never from the browser's words.
+   * @param {string} dir @param {number} week @param {unknown} taskId
+   */
+  function turnContext(dir, week, taskId, guided = false) {
+    const lines = [`${weekTitle(week)} (week ${week}).`, `Guide: docs/weeks/week-${pad2(week)}.md. Tests: tests/week-${pad2(week)}/.`];
+    const task = taskId ? weekTasks(dir, week).find((t) => t.id === taskId) : undefined;
+    if (task) lines.push(`Selected task: ${task.id} in ${task.file}: ${task.description}`, `Focused test command: ${focusedTestCommand(task)}`, "Tests in those files that belong to tasks not done yet don't count against this one; the studio checks that itself at the end of your turn.");
+    else lines.push("No task selected: ask which one they're on if it matters.");
+    if (guided) lines.push("Guided step: the student pressed Send on this step in the Build tab, so the message is the course's prompt and its approach is the one they chose. Don't ask for an approach: write it, explaining each part as you go, then run the focused test.");
+    return `<studio-context>\n${lines.join("\n")}\n</studio-context>`;
+  }
+
+  /** One message from the student. At most one turn at a time; a repeated clientId is not sent twice. @param {Record<string, unknown>} a */
+  async function send(a) {
+    const text = typeof a.text === "string" ? a.text.trim() : "";
+    const week = Number(a.week);
+    const clientId = typeof a.clientId === "string" ? a.clientId.slice(0, 80) : "";
+    if (!text) return fail(400, "Type a message first.");
+    if (text.length > AGENT_MAX_MESSAGE) return fail(400, "That message is too long.");
+    if (!Number.isInteger(week) || week < 1 || week > 20) return fail(400, "Which week is this for?");
+    if (clientId && clientId === lastClientId) return good;
+    if (phase !== "ready" || !link) return fail(409, "Codex isn't ready yet.");
+    if (turn) return fail(409, "Codex is still working: wait for it, or press Stop.");
+    const dir = repo();
+    if (!dir) return fail(409, "The course folder isn't set up yet.");
+    if (clientId) lastClientId = clientId;
+    lastWeek = week;
+    lastTask = a.task;
+    turn = { id: "", status: "starting" };
+    notedHints = false;
+    put({ id: `user-${++noteId}`, kind: "user", text });
+    publishState();
+    void startTurn(dir, week, a.task, text, a.guided === true);
+    return good;
+  }
+
+  /** @param {string} dir @param {number} week @param {unknown} task @param {string} text @param {boolean} [guided] */
+  async function startTurn(dir, week, task, text, guided = false) {
+    const mine = generation;
+    try {
+      await ensureThread(dir);
+      const r = await rpc("turn/start", {
+        threadId,
+        input: [
+          { type: "text", text: turnContext(dir, week, task, guided), text_elements: [] },
+          { type: "text", text, text_elements: [] },
+        ],
+        cwd: dir,
+        approvalPolicy: AGENT_APPROVAL_POLICY,
+        approvalsReviewer: "user",
+        sandboxPolicy: AGENT_SANDBOX_POLICY,
+      });
+      if (mine !== generation || !turn) return;
+      const wasStopping = turn.status === "stopping";
+      turn.id = String(r?.turn?.id ?? turn.id);
+      if (!wasStopping) turn.status = "running";
+      publishState();
+      if (wasStopping) interrupt();
+      if (r?.turn?.status && r.turn.status !== "inProgress") onTurnDone(r.turn);
+    } catch (error) {
+      if (mine !== generation || !turn) return; // the child died: onClosed has told the student
+      if (stopTimer) clearTimeout(stopTimer); // a Stop pressed meanwhile mustn't fire during the next turn
+      stopTimer = null;
+      const ambiguous = /** @type {Error & { ambiguous?: boolean }} */ (error).ambiguous;
+      turn = null;
+      note("bad", ambiguous ? `${/** @type {Error} */ (error).message} It may have started anyway, so nothing was sent again: check your folder before asking again.` : `Codex didn't take that message: ${/** @type {Error} */ (error).message}`);
+      publishState();
+    }
+  }
+
+  function interrupt() {
+    if (!turn?.id || !link) return;
+    rpc("turn/interrupt", { threadId, turnId: turn.id }).catch(() => {});
+  }
+
+  /** Stop: interrupt and wait for Codex to say so; if it never does, end the child rather than hang. */
+  function stopTurn() {
+    if (!turn) return good;
+    if (turn.status === "stopping") return good;
+    turn.status = "stopping";
+    publishState();
+    interrupt();
+    stopTimer = setTimeout(() => {
+      note("bad", "Codex didn't stop in time, so the studio ended it. It may have changed files first.");
+      void link?.stop();
+    }, stopWaitMs);
+    return good;
+  }
+
+  /** Sign in through Codex itself (its login is its own; the studio never sees a token). */
+  async function login() {
+    if (phase !== "signed-out" && phase !== "signing-in") return fail(409, "Codex doesn't need signing in right now.");
+    try {
+      const r = await rpc("account/login/start", { type: "chatgpt" });
+      const url = String(r?.authUrl ?? "");
+      if (!/^https:\/\//.test(url)) throw new Error("Codex didn't give a sign-in page.");
+      loginUrl = url;
+      phase = "signing-in";
+    } catch (error) {
+      problem = /** @type {Error} */ (error).message;
+    }
+    publishState();
+    return good;
+  }
+
+  /** The one fix this state offers (install or update), typed like any step's command. @param {Record<string, unknown>} a */
+  function runFix(a) {
+    const display = phase === "missing" ? CODEX_INSTALL : phase === "too-old" ? CODEX_UPDATE : "";
+    if (!display) return fail(409, "There's nothing to fix right now.");
+    if (fix?.phase === "running") return fail(409, "It's still running.");
+    if (typeof a.typed !== "string" || normalizeCommand(a.typed) !== normalizeCommand(display)) return fail(400, "What was typed doesn't match the command.");
+    if (!ctx.stream) return fail(409, "The studio can't run that here.");
+    fix = { phase: "running", out: "", display };
+    publishState();
+    const run = ctx.stream(display.split(" "), undefined, (t) => {
+      if (fix) fix.out = cleanOutput(fix.out + t).slice(-4000);
+      publishState();
+    });
+    void run.done.then((code) => {
+      if (code === 0) {
+        fix = null;
+        phase = "off";
+        problem = "";
+        void open();
+      } else if (fix) fix.phase = "failed";
+      publishState();
+    });
+    return good;
+  }
+
+  return {
+    snapshot,
+    /** @param {Record<string, unknown>} a */
+    act: async (a) => {
+      switch (a.type) {
+        case "agent-open":
+          return open();
+        case "agent-send":
+          return send(a);
+        case "agent-answer":
+          return answer(a);
+        case "agent-stop":
+          return stopTurn();
+        case "agent-login":
+          return login();
+        case "agent-recheck":
+          // After upgrading the plan: ask Codex again who's signed in, and on which plan.
+          if (phase !== "ready" || !link) return fail(409, "Codex isn't running.");
+          await readAccount();
+          return good;
+        case "agent-fix":
+          return runFix(a);
+        default:
+          return fail(400, "Unknown action.");
+      }
+    },
+    /** Its tests pass: offer the commit right here. @param {number} week @param {string} id @param {string} [said] */
+    commitOffer: (week, id, said = `The tests for \`${id}\` pass.`) => put({ id: `note-${++noteId}`, kind: "note", tone: "info", text: `${said} Read what changed, then commit it (or on its card in the Code tab). It commits the whole file, with anything else you changed in it.`, commit: { week, id } }),
+    /** The studio's run outside the sandbox, for the student to press. @param {number} week @param {string} id @param {string} [said] */
+    testOffer: (week, id, said = `Check \`${id}\`.`) => put({ id: `note-${++noteId}`, kind: "note", tone: "info", text: `${said} This runs its tests outside the sandbox, leaving out tests for tasks you haven't done yet.`, runTests: { week, id } }),
+    /** @param {string} id */
+    testOfferDone: (id) => {
+      for (const e of entries.filter((x) => /** @type {any} */ (x.runTests)?.id === id)) put({ ...e, runTests: null });
+    },
+    /** @param {"info" | "bad"} tone @param {string} text */
+    say: (tone, text) => note(tone, text),
+    /** That task is committed: its button goes. @param {string} id */
+    commitDone: (id) => {
+      for (const e of entries.filter((x) => /** @type {any} */ (x.commit)?.id === id)) put({ ...e, commit: null });
+    },
+    /** A turn is running and nobody's being waited on (so a closed tab doesn't end it). */
+    busy: () => Boolean(turn && !cards.length),
+    /** Ends only the child this studio started: a bounded wait, then its whole tree. */
+    shutdown: async () => {
+      shuttingDown = true;
+      if (stopTimer) clearTimeout(stopTimer);
+      const t = link;
+      link = null;
+      if (t) await t.stop();
     },
   };
 }
@@ -2817,21 +3929,147 @@ export function checkRequest(req, studio) {
 }
 
 /**
+ * Markdown for the agent's replies in the chat. The text is untrusted (it comes from the model), so
+ * everything is escaped before any markup is added: no HTML gets through, links are http(s) only and
+ * open in a new tab with no referrer or opener, and images are never loaded (their alt text shows).
+ * Fenced code gets a box with its language and a Copy button; a fence still open while the reply
+ * streams shows as code until it closes. Self-contained: it also runs in the page.
+ * @param {string} markdown
+ * @returns {string}
+ */
+export function chatMarkdown(markdown) {
+  const esc = (/** @type {string} */ t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  /** @param {string} escaped  the URL as it stands in escaped text @param {string} label */
+  const link = (escaped, label) => {
+    const url = escaped.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+    return /^https?:\/\/[^\s"'<>`\\]+$/i.test(url) ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${label}</a>` : label;
+  };
+  /** Inline markup on already-escaped text: code, links, bold, italic. @param {string} raw */
+  const inline = (raw) =>
+    raw
+      .split(/(`[^`\n]+`)/)
+      .map((part, i) => {
+        if (i % 2 === 1) return `<code>${esc(part.slice(1, -1))}</code>`;
+        // Links become placeholders first, so emphasis can't reach into their markup or address.
+        /** @type {string[]} */
+        const held = [];
+        const hold = (/** @type {string} */ html) => `\u0000${held.push(html) - 1}\u0000`;
+        return esc(part.replace(/\u0000/g, ""))
+          .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt) => `[image: ${alt}]`)
+          .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label, url) => hold(link(url, label)))
+          .replace(/(^|[\s(])(https?:\/\/(?:(?!&quot;|&#39;|&lt;|&gt;)[^\s<\u0000])*[^\s<.,;:!?)&\u0000])/g, (_m, pre, url) => `${pre}${hold(link(url, url))}`)
+          .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+          .replace(/(^|[^*\w])\*([^*\s][^*\n]*)\*/g, "$1<em>$2</em>")
+          .replace(/(^|\W)_([^_\s][^_\n]*)_(?=\W|$)/g, "$1<em>$2</em>")
+          .replace(/\u0000(\d+)\u0000/g, (_m, n) => held[Number(n)] ?? "");
+      })
+      .join("");
+  const lines = String(markdown ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const listMark = /^(\s*)([-*+]|\d+[.)])\s+/;
+  const rule = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+  const cells = (/** @type {string} */ l) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+  /** @type {string[]} */
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+    const fence = /^\s*```\s*([\w+#.-]*)/.exec(line);
+    if (fence) {
+      const body = [];
+      i++;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i++]);
+      i++;
+      out.push(`<div class="mdcode"><div class="mdcodebar"><span>${esc(fence[1] || "text")}</span><button class="mdcopy" type="button" data-md-copy>Copy</button></div><pre><code>${esc(body.join("\n"))}</code></pre></div>`);
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      const level = Math.min(6, heading[1].length + 2);
+      out.push(`<h${level}>${inline(heading[2].replace(/\s*#+\s*$/, ""))}</h${level}>`);
+      i++;
+      continue;
+    }
+    if (/^\s*>/.test(line)) {
+      const body = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) body.push(lines[i++].replace(/^\s*>\s?/, ""));
+      out.push(`<blockquote>${chatMarkdown(body.join("\n"))}</blockquote>`);
+      continue;
+    }
+    if (line.includes("|") && i + 1 < lines.length && rule.test(lines[i + 1])) {
+      const head = cells(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) rows.push(cells(lines[i++]));
+      out.push(`<div class="mdtable"><table><thead><tr>${head.map((c) => `<th>${inline(c)}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
+      continue;
+    }
+    const mark = listMark.exec(line);
+    if (mark) {
+      const ordered = /\d/.test(mark[2]);
+      const items = [];
+      while (i < lines.length) {
+        const m = listMark.exec(lines[i]);
+        if (!m || /\d/.test(m[2]) !== ordered) break;
+        const body = [lines[i].slice(m[0].length)];
+        i++;
+        while (i < lines.length && lines[i].trim() && !listMark.test(lines[i]) && !/^\s*```/.test(lines[i])) body.push(lines[i++].trim());
+        items.push(`<li>${inline(body.join(" "))}</li>`);
+      }
+      out.push(ordered ? `<ol>${items.join("")}</ol>` : `<ul>${items.join("")}</ul>`);
+      continue;
+    }
+    const para = [line.trim()];
+    i++;
+    while (i < lines.length && lines[i].trim() && !/^\s*(```|#{1,6}\s|>)/.test(lines[i]) && !listMark.test(lines[i]) && !(lines[i].includes("|") && rule.test(lines[i + 1] ?? ""))) para.push(lines[i++].trim());
+    out.push(`<p>${inline(para.join(" "))}</p>`);
+  }
+  return out.join("");
+}
+
+/**
+ * A command as a student reads it: without the shell wrapper Codex puts around it
+ * (`/bin/zsh -lc 'npx vitest run …'` shows as `npx vitest run …`).
+ * @param {string} command
+ */
+export function plainCommand(command) {
+  const m = /^\s*(?:\/(?:usr\/)?bin\/)?(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1\s*$/.exec(String(command ?? ""));
+  if (!m) return /^\s*(?:\/(?:usr\/)?bin\/)?(?:ba|z)?sh\s+-l?c\s+(\S+)\s*$/.exec(String(command ?? ""))?.[1] ?? String(command ?? "");
+  // The shell's ways of putting a ' inside '…': '\'' and '"'"'.
+  return m[1] === "'" ? m[2].replace(/'\\''/g, "'").replace(/'"'"'/g, "'") : m[2].replace(/\\(["\\$`])/g, "$1");
+}
+
+/**
  * Markdown to HTML for the course's own documents (guides, ARCHITECTURE.md, design notes), shown
  * inside the studio: headings, paragraphs, lists (nested, with code inside), code fences, tables,
  * quotes, rules, links and images. Everything is escaped first; only safe link schemes survive.
  * @param {string} markdown
  * @returns {string}
  */
-export function renderMarkdown(markdown) {
+export function renderMarkdown(markdown, { strict = false } = {}) {
   const lines = markdown.replace(/\r\n?/g, "\n").replace(/<!--[\s\S]*?-->/g, "").split("\n");
-  return blocks(lines);
+  strictLinks = strict;
+  try {
+    return blocks(lines);
+  } finally {
+    strictLinks = false;
+  }
 }
 
 /** @param {string} t */
 const escHtml = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 /** A link target the course's documents may use: relative, #anchor, http(s) or mailto. @param {string} url */
-const safeUrl = (url) => (/^(?:[a-z][a-z0-9+.-]*:)/i.test(url) && !/^(?:https?|mailto):/i.test(url) ? "#" : url);
+const safeUrl = (url) => {
+  // Browsers drop control characters and whitespace inside a URL, so "\x01javascript:" is javascript:.
+  const bare = url.replace(/[\x00-\x20\x7f-\x9f]/g, "");
+  if (strictLinks) return /^https?:\/\/[^\s"'<>`\\]+$/i.test(bare) ? bare : "#";
+  return /^(?:[a-z][a-z0-9+.-]*:)/i.test(bare) && !/^(?:https?|mailto):/i.test(bare) ? "#" : bare;
+};
+/** While rendering for the studio's own page (design notes): links only http(s), no images. */
+let strictLinks = false;
 
 /** @param {string} text */
 function inline(text) {
@@ -2840,8 +4078,8 @@ function inline(text) {
     .map((part, i) => {
       if (i % 2 === 1) return `<code>${escHtml(part.replace(/^`+|`+$/g, ""))}</code>`;
       return escHtml(part)
-        .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt, url) => `<img alt="${alt}" src="${safeUrl(url)}">`)
-        .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => `<a href="${safeUrl(url)}">${label}</a>`)
+        .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt, url) => (strictLinks ? `[image: ${alt}]` : `<img alt="${alt}" src="${safeUrl(url)}">`))
+        .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => (strictLinks ? (safeUrl(url) === "#" ? label : `<a href="${safeUrl(url)}" target="_blank" rel="noopener noreferrer">${label}</a>`) : `<a href="${safeUrl(url)}">${label}</a>`))
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
         .replace(/(^|[^*\w])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
     })
@@ -3005,9 +4243,16 @@ export function courseFile(dir, urlPath) {
 }
 
 /**
- * The code box's script, studio/editor.js: the one that came with this studio (beside it: in its
- * course folder, or saved next to a newer studio), else the course folder's (it may be older),
- * else null (the page falls back to a plain text box).
+ * The code box's script runs in the studio's own page, and the agent can write a working-tree copy
+ * without asking, so only the exact bundle this studio was released with is ever served
+ * (scripts/studio/build-editor.sh keeps this hash right).
+ */
+export const EDITOR_SHA256 = "8a72994c389e65c2ce104ae96424e403469a701d4f050c6399cdbdcd5784e5c4";
+
+/**
+ * The code box's script, studio/editor.js: that exact bundle, from beside this studio (its course
+ * folder, or saved next to a newer studio) or the course folder; else null (the page falls back
+ * to a plain text box).
  * @param {string | null} dir
  * @returns {Buffer | null}
  */
@@ -3015,7 +4260,9 @@ export function editorBundle(dir) {
   const here = dirname(fileURLToPath(import.meta.url));
   for (const path of [join(here, "studio", "editor.js"), join(here, "editor.js"), dir && join(dir, "studio", "editor.js")]) {
     try {
-      if (path) return readFileSync(path);
+      if (!path) continue;
+      const body = readFileSync(path);
+      if (createHash("sha256").update(body).digest("hex") === EDITOR_SHA256) return body;
     } catch {
       // not there: try the next place
     }
@@ -3031,8 +4278,13 @@ export function editorBundle(dir) {
 export function serveStudio(studio, { token = randomBytes(24).toString("base64url"), port = 0, onIdle, idleMs = 45_000, log = () => {} } = {}) {
   let clients = 0;
   let seen = 0; // 0 until the page first connects
+  const viewToken = randomBytes(24).toString("base64url");
+  const sameSecret = (/** @type {string} */ a, /** @type {string} */ b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    // A course page's own read-only address: its token opens that and nothing else.
+    const view = /^\/view\/([^/]+)(\/.*)$/.exec(url.pathname);
+    const viewOk = view !== null && req.method === "GET" && sameSecret(view[1], viewToken);
     // The token: in the address (the link from the terminal), the header (the page's own calls), or,
     // for pages opened inside the studio (a lesson page and its links), the studio's same-site cookie.
     const cookie = /(?:^|;\s*)netsim_studio=([^;]+)/.exec(req.headers.cookie ?? "")?.[1];
@@ -3041,7 +4293,7 @@ export function serveStudio(studio, { token = randomBytes(24).toString("base64ur
         method: req.method ?? "GET",
         host: req.headers.host,
         origin: req.headers.origin,
-        token: url.searchParams.get("t") ?? /** @type {string | undefined} */ (req.headers["x-studio-token"]) ?? (req.method === "GET" ? cookie : undefined) ?? null,
+        token: viewOk ? token : view ? null : (url.searchParams.get("t") ?? /** @type {string | undefined} */ (req.headers["x-studio-token"]) ?? (req.method === "GET" ? cookie : undefined) ?? null),
       },
       { port: address().port, token },
     );
@@ -3051,12 +4303,17 @@ export function serveStudio(studio, { token = randomBytes(24).toString("base64ur
       return;
     }
     const secure = { "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "cache-control": "no-store" };
+    // A course page: scripts run (its popovers), but in an opaque origin, so whatever's in the file
+    // can't reach the studio's page, its token or its Approve buttons. The sandbox comes from the
+    // server, so it holds wherever the page is opened. No cookie reaches a sandboxed page, which is
+    // why its links and images use the /view/ address.
+    const pageCsp = () => `sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src http://${req.headers.host} data:; frame-ancestors http://${req.headers.host}; base-uri 'none'; form-action 'none'`;
     if (req.method === "GET" && url.pathname === "/") {
       res.writeHead(200, {
         ...secure,
         "content-type": "text/html; charset=utf-8",
         "content-security-policy":
-          "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-src 'self' http://localhost:3005 http://127.0.0.1:3005; base-uri 'none'; form-action 'none'",
+          "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-src 'self' http://localhost:3005 http://127.0.0.1:3005; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
         // Same-site, this address only: lets the lesson pages and their links load inside the studio.
         "set-cookie": `netsim_studio=${token}; Path=/; HttpOnly; SameSite=Strict`,
       });
@@ -3076,7 +4333,7 @@ export function serveStudio(studio, { token = randomBytes(24).toString("base64ur
           res.writeHead(200, {
             ...secure,
             "content-type": "text/html; charset=utf-8",
-            "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
+            "content-security-policy": pageCsp(),
           });
           res.end(online.endsWith(".md") ? markdownPage(`Week ${week}`, text) : text);
           return;
@@ -3099,6 +4356,23 @@ export function serveStudio(studio, { token = randomBytes(24).toString("base64ur
       res.writeHead(200, { ...secure, "content-type": "text/javascript; charset=utf-8" }).end(body);
       return;
     }
+    // The Build tab's steps.
+    if (req.method === "GET" && url.pathname === "/api/build") {
+      const steps = studio.buildSteps(Number(url.searchParams.get("week")));
+      res.writeHead(steps ? 200 : 409, { ...secure, "content-type": "application/json" }).end(JSON.stringify({ steps: steps ?? [] }));
+      return;
+    }
+    // The tasks the Agent tab can work on.
+    if (req.method === "GET" && url.pathname === "/api/agent/tasks") {
+      const tasks = studio.agentTasks(Number(url.searchParams.get("week")));
+      res.writeHead(tasks ? 200 : 409, { ...secure, "content-type": "application/json" }).end(JSON.stringify({ tasks: tasks ?? [] }));
+      return;
+    }
+    // The Agent tab's state, when the page missed a numbered event.
+    if (req.method === "GET" && url.pathname === "/api/agent") {
+      res.writeHead(200, { ...secure, "content-type": "application/json" }).end(JSON.stringify(studio.agentSnapshot()));
+      return;
+    }
     // A week's tasks, for its Code tab.
     if (req.method === "GET" && url.pathname === "/api/code") {
       const tasks = studio.weekCode(Number(url.searchParams.get("week")));
@@ -3106,15 +4380,22 @@ export function serveStudio(studio, { token = randomBytes(24).toString("base64ur
       return;
     }
     // A file from the course folder (a lesson page, a linked document, an image), shown inside the studio.
+    // Those files can be written by the agent without asking, so they're only ever served sandboxed
+    // (pageCsp), at a read-only path of their own: the address with the cookie just goes there.
     const dir = studio.repoDir();
-    const file = req.method === "GET" && dir && !["/events", "/api/act", "/api/code", "/editor.js"].includes(url.pathname) ? courseFile(dir, url.pathname) : null;
+    const viewing = view !== null;
+    const file = req.method === "GET" && dir && (viewing || !["/events", "/api/act", "/api/code", "/api/agent", "/api/agent/tasks", "/api/build", "/editor.js"].includes(url.pathname)) ? courseFile(dir, viewing ? view[2] : url.pathname) : null;
+    if (file && !viewing) {
+      res.writeHead(302, { ...secure, location: `/view/${viewToken}${url.pathname}` }).end();
+      return;
+    }
     if (file) {
-      res.writeHead(200, {
-        ...secure,
-        "content-type": file.type,
-        "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
-      });
+      res.writeHead(200, { ...secure, "content-type": file.type, "content-security-policy": pageCsp() });
       res.end(file.body);
+      return;
+    }
+    if (viewing) {
+      res.writeHead(404, secure).end();
       return;
     }
     if (req.method === "GET" && url.pathname === "/events") {
@@ -3125,6 +4406,7 @@ export function serveStudio(studio, { token = randomBytes(24).toString("base64ur
       seen = Date.now();
       send("state", studio.snapshot());
       send("output", { ...studio.output(), reset: true });
+      send("agent", { type: "snapshot", snapshot: studio.agentSnapshot() });
       const unsubscribe = studio.subscribe(send);
       const ping = setInterval(() => res.write(": ping\n\n"), 15_000);
       req.on("close", () => {
@@ -3309,16 +4591,25 @@ export function codeFilePath(dir, rel) {
  */
 export function guideFor(guide, week, id, file) {
   const lines = guide.split("\n");
-  const at = lines.findIndex((l) => l.includes(`TODO(week ${week}, ${id})`));
+  // A guide in the build-step format marks each task (<!-- step week=W id=ID -->): its concept and
+  // prompt follow the mark. Older guides name the task's TODO in the text.
+  const marked = lines.findIndex((l) => new RegExp(`^\\s*<!--\\s*step\\s+week=\\d+\\s+id=${id}\\s*-->`).test(l));
+  const at = marked >= 0 ? marked : lines.findIndex((l) => l.includes(`TODO(week ${week}, ${id})`));
   if (at < 0) return { lesson: "", prompt: "", order: Infinity };
   let from = at;
   while (from > 0 && lines[from - 1].trim() && !/^\s*([-*]|\d+\.)\s/.test(lines[from])) from--;
   let to = at + 1;
   while (to < lines.length && lines[to].trim() && !/^\s*([-*]|\d+\.)\s/.test(lines[to]) && !/^\s*```/.test(lines[to])) to++;
-  const lesson = lines.slice(from, to).map((l) => l.trim()).join(" ").replace(/^([-*]|\d+\.)\s+/, "");
+  let lesson = lines.slice(from, to).map((l) => l.trim()).join(" ").replace(/^([-*]|\d+\.)\s+/, "");
+  if (marked >= 0) {
+    let end = marked + 1;
+    while (end < lines.length && !/^\s*```/.test(lines[end]) && !/^\s*<!--\s*step\b/.test(lines[end]) && !/^#{2,3} /.test(lines[end])) end++;
+    lesson = lines.slice(marked + 1, end).map((l) => l.trim()).join(" ").replace(/\s+/g, " ").trim();
+  }
   let prompt = "";
-  if (/^board\//.test(file)) {
-    // The guide's ready prompt: the first ```text block after the task, if it names this file.
+  {
+    // The guide's ready prompt: the first ```text block after the task, if it names this file. The
+    // guide is the student's own copy, so this only ever shows a week they've been given.
     for (let i = at + 1; i < lines.length && i < at + 40; i++) {
       if (/^\s*```text\s*$/.test(lines[i])) {
         const close = lines.findIndex((l, j) => j > i && /^\s*```\s*$/.test(l));
@@ -3336,6 +4627,144 @@ export function guideFor(guide, week, id, file) {
     }
   }
   return { lesson, prompt, order: at };
+}
+
+/**
+ * A week's build steps, from its guide (docs/weeks/week-NN.md), in order. Each step is a block the
+ * guide marks with <!-- step week=W id=ID -->: the "### " heading above it is its title, the text
+ * between the mark and its first ```text block is the concept, that block is the prompt, then a
+ * "Test: `cmd`" (or "Test: none yet: why") line, an "Ask:" line and a "Stuck?" line (the common
+ * failure and what to try, shown under the step, first when its test is red). Steps under a "## " heading that
+ * says take-home come after, marked so. Each carries where its task stands: still the stub, or
+ * committed as it is now.
+ * @param {Context} ctx @param {string} dir @param {number} week
+ * @param {{ id: string, week: number, file: string, stubbed: boolean, rev: string }[]} tasks  every week's tasks
+ */
+export function buildSteps(ctx, dir, week, tasks) {
+  const guide = ctx.readText(join(dir, `docs/weeks/week-${pad2(week)}.md`)) ?? "";
+  const lines = guide.split("\n");
+  /** @type {{ title: string, week: number, id: string, concept: string, prompt: string, test: string, testNote: string, ask: string, stuck: string, takeHome: boolean, component: { id: string, title: string, intro: string, works: string, check: string, board: boolean, notes: string } }[]} */
+  const found = [];
+  let section = "";
+  let heading = "";
+  /** @type {{ id: string, title: string, intro: string, works: string, check: string, board: boolean, notes: string }} */
+  let component = { id: "", title: "", intro: "", works: "", check: "", board: false, notes: "" };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^## /.test(line)) section = line;
+    // A component: "## Component N · title", its mark, a short intro, then "When it works:", and
+    // optional "Check: `cmd`" and "Board: yes" lines. Its steps are the step blocks until the next one.
+    const comp = /^\s*<!--\s*component\s+id=([a-z0-9-]+)\s*-->\s*$/.exec(line);
+    if (comp) {
+      const intro = [];
+      let works = "";
+      let check = "";
+      let board = false;
+      let k = i + 1;
+      /** @type {string[]} */
+      const notes = [];
+      for (; k < lines.length && !/^#{2,3} /.test(lines[k]) && !/^\s*<!--\s*(step|component)\b/.test(lines[k]); k++) {
+        // The component's reference (state table, encoding…): <!-- notes --> … <!-- /notes -->.
+        if (/^\s*<!--\s*notes\s*-->\s*$/.test(lines[k])) {
+          for (k++; k < lines.length && !/^\s*<!--\s*\/notes\s*-->\s*$/.test(lines[k]); k++) if (!/^####\s+Design notes\s*$/i.test(lines[k])) notes.push(lines[k]);
+          continue;
+        }
+        const w = /^\s*When it works:\s*(.+)$/.exec(lines[k]);
+        const c = /^\s*Check:\s*`([^`]+)`/.exec(lines[k]);
+        if (w) {
+          works = w[1].trim();
+          check ||= /`([^`]+)`/.exec(works)?.[1] ?? "";
+          board ||= /On the Board/i.test(works);
+        }
+        else if (c) check = c[1];
+        else if (/^\s*Board:\s*yes\b/i.test(lines[k])) board = true;
+        else intro.push(lines[k].trim());
+      }
+      // Its title: "### Component · title" (or "## Component N · title") just above the mark.
+      const above = /^Component\b/i.test(heading) ? heading : section.replace(/^##\s+/, "");
+      component = { id: comp[1], title: above.replace(/^Component\s*(\d+\s*)?·\s*/i, "").trim(), intro: intro.join(" ").replace(/\s+/g, " ").trim(), works, check, board, notes: notes.length ? renderMarkdown(notes.join("\n"), { strict: true }) : "" };
+      continue;
+    }
+    if (/^### /.test(line)) heading = line.slice(4).trim();
+    const mark = /^\s*<!--\s*step\s+week=(\d+)\s+id=([a-z0-9-]+)\s*-->\s*$/.exec(line);
+    if (!mark) continue;
+    let j = i + 1;
+    const concept = [];
+    while (j < lines.length && !/^\s*```text\s*$/.test(lines[j]) && !/^\s*<!--\s*step\b/.test(lines[j]) && !/^#{2,3} /.test(lines[j])) concept.push(lines[j++]);
+    let prompt = "";
+    if (/^\s*```text\s*$/.test(lines[j] ?? "")) {
+      const close = lines.findIndex((l, k) => k > j && /^\s*```\s*$/.test(l));
+      const block = lines.slice(j + 1, close < 0 ? undefined : close);
+      const pad = Math.min(...block.filter((l) => l.trim()).map((l) => /^\s*/.exec(l)?.[0].length ?? 0));
+      // The guide wraps at 100 columns: each sentence back on one line (list items keep theirs).
+      prompt = block
+        .map((l) => l.slice(Number.isFinite(pad) ? pad : 0))
+        .reduce((out, l) => (out.length && l.trim() && !/^\s*(\d+\.|[-*])\s/.test(l) && out[out.length - 1].trim() ? [...out.slice(0, -1), `${out[out.length - 1]} ${l.trim()}`] : [...out, l]), /** @type {string[]} */ ([]))
+        .join("\n")
+        .trim();
+      j = close < 0 ? lines.length : close + 1;
+    }
+    let test = "";
+    let testNote = "";
+    let ask = "";
+    let stuck = "";
+    for (let k = j; k < lines.length && k < j + 8 && !/^\s*<!--\s*step\b/.test(lines[k]) && !/^#{2,3} /.test(lines[k]); k++) {
+      const t = /Test:\s*`([^`]+)`/.exec(lines[k]);
+      if (t) test = t[1];
+      else if (/^\s*Test:\s*none/i.test(lines[k])) testNote = lines[k].replace(/^\s*Test:\s*/i, "").replace(/\s*·.*$/, "").trim();
+      const q = /^\s*Ask:\s*(.+)$/.exec(lines[k]);
+      if (q) ask = q[1].trim();
+      const h = /^\s*Stuck\?\s*(.+)$/.exec(lines[k]);
+      if (h) stuck = h[1].trim();
+    }
+    found.push({ title: heading.replace(/^(Round|Step|Take-home)\s+\d+\s*·\s*/i, ""), week: Number(mark[1]), id: mark[2], concept: concept.map((l) => l.trim()).join(" ").replace(/\s+/g, " ").trim(), prompt, test, testNote, ask, stuck, takeHome: /take-?home/i.test(section), component });
+  }
+  const ordered = [...found.filter((x) => !x.takeHome), ...found.filter((x) => x.takeHome)];
+  /** @type {Map<string, Map<string, string>>} */
+  const committedFiles = new Map();
+  const inHead = (/** @type {string} */ file, /** @type {string} */ id) => {
+    if (!committedFiles.has(file)) {
+      const text = output(ctx, ["git", "show", `HEAD:${file}`], dir) ?? "";
+      const head = text.split("\n");
+      committedFiles.set(file, new Map(findCodeRegions(text).map((r) => [r.id, head.slice(r.start + 1, r.end).map((l) => l.trim()).join("\n")])));
+    }
+    return committedFiles.get(file)?.get(id);
+  };
+  return ordered.map((step, n) => {
+    const task = tasks.find((t) => t.id === step.id && t.week === step.week) ?? tasks.find((t) => t.id === step.id);
+    const now = task ? (ctx.readText(join(dir, task.file)) ?? "") : "";
+    const region = task ? findCodeRegions(now).find((r) => r.id === task.id) : undefined;
+    const body = region ? now.split("\n").slice(region.start + 1, region.end).map((l) => l.trim()).join("\n") : "";
+    const head = task && region ? inHead(task.file, task.id) : undefined;
+    const committed = Boolean(task && !task.stubbed && region && head === body);
+    // Its code differs from the last commit (written, not committed yet).
+    const dirty = Boolean(task && region && head !== undefined && head !== body);
+    return { n: n + 1, ...step, week: task?.week ?? step.week, file: task?.file ?? "", found: Boolean(task), stubbed: task?.stubbed ?? true, committed, dirty, rev: task?.rev ?? "" };
+  });
+}
+
+/** A task's lines as the course released them, by week, file and task (they don't change while a studio runs). @type {Map<string, string | null>} */
+const releasedRegions = new Map();
+
+/**
+ * Is this task still the stub the course gave out? Only then does its card start empty, with the
+ * grey hint to type over. A TODO line isn't enough: Codex (or the student) often leaves it above
+ * real code. Compared with the released week when it's here; without it, only the standard stub
+ * (its TODO, comments and a todo() call) counts.
+ * @param {Context} ctx @param {string} dir @param {string} file @param {CodeRegion} r @param {number} week @param {string[]} body  the task's lines, without its indent
+ */
+function isUntouchedStub(ctx, dir, file, r, week, body) {
+  if (!/^(\/\/|;) TODO\(/.test(body[0] ?? "") || !(body[0] ?? "").includes(`, ${r.id})`)) return false;
+  const key = `${dir}|${week}|${file}|${r.id}`;
+  if (!releasedRegions.has(key)) {
+    const text = output(ctx, ["git", "show", `upstream/week-${week}:${file}`], dir);
+    const lines = text?.split("\n");
+    const was = lines && findCodeRegions(text ?? "").find((x) => x.id === r.id);
+    releasedRegions.set(key, lines && was ? lines.slice(was.start + 1, was.end).map((l) => l.replace(/\r$/, "").trim()).join("\n") : null);
+  }
+  const released = releasedRegions.get(key);
+  if (released !== null && released !== undefined) return released === body.map((l) => l.trim()).join("\n");
+  return body.every((l) => !l.trim() || /^\s*(\/\/|;)/.test(l) || /^return (todo|notBuilt)\(/.test(l.trim()));
 }
 
 /**
@@ -3357,6 +4786,10 @@ export function weekCode(ctx, dir, week) {
   }
   /** @type {Map<string, { words: string[], members: string[] }>} */
   const names = new Map();
+  // Which tasks each test needs, measured at release (null in an older hints file).
+  const rawNeeds = hints.$tests;
+  /** @type {Record<string, string[]> | null} */
+  const needs = rawNeeds && typeof rawNeeds === "object" && !Array.isArray(rawNeeds) ? /** @type {Record<string, string[]>} */ (rawNeeds) : null;
   const tests = ctx.capture(["git", "ls-files", "--", `tests/week-${pad2(week)}/`], dir)?.stdout.split("\n").filter((f) => /\.test\.tsx?$/.test(f)) ?? [];
   const tasks = [];
   for (const file of regionFiles(ctx, dir)) {
@@ -3369,14 +4802,16 @@ export function weekCode(ctx, dir, week) {
       const said = guideFor(guide, week, r.id, file);
       const prompt = said.prompt || (/^board\//.test(file) ? `In ${file} only, fill in TODO(week ${week}, ${r.id}): ${r.description}. Don't change any other file or any test, and explain each line you write.` : "");
       const modulePath = file.replace(/\.(tsx?|asm)$/, "");
-      const covering = tests.filter((t) => (ctx.readText(join(dir, t)) ?? "").includes(modulePath));
+      // The test files with a test that needs this task (measured at release), else the ones importing its file.
+      const measured = [...new Set(Object.entries(needs ?? {}).filter(([, ids]) => ids.includes(r.id)).map(([key]) => key.split(" > ")[0]))].filter((t) => tests.includes(t));
+      const covering = measured.length ? measured : tests.filter((t) => (ctx.readText(join(dir, t)) ?? "").includes(modulePath));
       // The file's names, and the ones its tasks' hints use (the stubs don't have them yet).
-      if (!names.has(file)) names.set(file, fileNames(ctx, dir, file, [text, ...Object.values(hints).map((h) => hintOf(h).code)].join("\n")));
+      if (!names.has(file)) names.set(file, fileNames(ctx, dir, file, [text, ...Object.entries(hints).filter(([k]) => k !== "$tests").map(([, h]) => hintOf(h).code)].join("\n")));
       const { code: hint, steps } = hintOf(hints[r.id]);
       const context = regionContext(lines, r);
       const signature = context.before.find((l) => !/^\s*(\/\*\*?|\*|\/\/)/.test(l)) ?? "";
       const fn = /function\s+([A-Za-z_$][\w$]*)|([A-Za-z_$][\w$]*)\s*(?:=\s*(?:async\s*)?)?\(/.exec(signature);
-      tasks.push({ id: r.id, file, part: r.part, hint, steps, fn: fn?.[1] ?? fn?.[2] ?? "", endLine: r.end, .../** @type {{ words: string[], members: string[] }} */ (names.get(file)), description: r.description, ...regionContext(lines, r), indent: r.indent, body: body.join("\n"), rev: regionRev(lines, r), lesson: said.lesson, prompt, tests: covering.length ? covering : [`tests/week-${pad2(week)}`], order: said.order, line: r.start + 2, stubbed: /^(\/\/|;) TODO\(/.test(body[0] ?? "") && (body[0] ?? "").includes(`, ${r.id})`) });
+      tasks.push({ id: r.id, file, part: r.part, hint, steps, fn: fn?.[1] ?? fn?.[2] ?? "", endLine: r.end, .../** @type {{ words: string[], members: string[] }} */ (names.get(file)), description: r.description, ...regionContext(lines, r), indent: r.indent, body: body.join("\n"), rev: regionRev(lines, r), lesson: said.lesson, prompt, tests: covering.length ? covering : [`tests/week-${pad2(week)}`], needs, order: said.order, line: r.start + 2, stubbed: isUntouchedStub(ctx, dir, file, r, week, body) });
     }
   }
   return tasks.sort((a, b) => Number(a.part === "home") - Number(b.part === "home") || a.order - b.order);
@@ -3444,6 +4879,7 @@ export function writeRegion(dir, { file, id, week, rev, body }) {
   const path = codeFilePath(dir, /** @type {string} */ (file));
   if (!path) return { error: "That file isn't one of the course's code files." };
   if (typeof body !== "string" || body.length > MAX_BODY) return { error: "That's too long for one task." };
+  if (!body.trim()) return { error: "The box is empty, so nothing was saved: your file is as it was. Type or paste the code first." };
   if (body.split("\n").some((l) => REGION_MARKER.test(l))) return { error: "The code can't contain @student, @stub or @end lines: those mark where the task starts and ends." };
   const text = readFileSync(path, "utf8");
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
@@ -3451,7 +4887,7 @@ export function writeRegion(dir, { file, id, week, rev, body }) {
   const found = findCodeRegions(text).filter((r) => r.id === id);
   if (found.length !== 1 || found[0].week !== week) return { error: `Couldn't find the task ${String(id)} in ${String(file)} (its @student and @end lines must be there, once).` };
   const r = found[0];
-  if (regionRev(lines, r) !== rev) return { error: "This task changed in the file since the studio showed it (in VS Code?). Reload it, then save again." };
+  if (regionRev(lines, r) !== rev) return { error: "This task changed in the file since the card loaded it (Codex or VS Code), so nothing was saved. Reload it, then save again." };
   const cr = eol === "\r\n" ? "\r" : "";
   const written = body.replace(/\r/g, "").split("\n").map((l) => (l.trim() ? `${r.indent}${l}` : "") + cr);
   const next = [...lines.slice(0, r.start + 1), ...written, ...lines.slice(r.end)].join("\n");
@@ -3463,6 +4899,17 @@ export function writeRegion(dir, { file, id, week, rev, body }) {
 }
 
 /**
+ * A test's failure in words a student can act on. vitest's JSON report says "STACK_TRACE_ERROR"
+ * for a test that ran out of time, so that becomes what it means.
+ * @param {string} message
+ */
+export function readableFailure(message) {
+  if (/^Error: STACK_TRACE_ERROR\b/.test(message) || /^Error: Test timed out/.test(message))
+    return "Timed out: the test waited and nothing answered in time. Usually a reply that never comes: something that should answer (a part, a handler) doesn't yet, or the code waits for the wrong message.";
+  return message;
+}
+
+/**
  * The results of a vitest JSON report, for one task: what passed, what failed, and what only waits
  * for another task that's still a stub: its TODO is in the message, the error came from inside its
  * code, or the test is named after its function. This task's own failures are listed first.
@@ -3470,9 +4917,14 @@ export function writeRegion(dir, { file, id, week, rev, body }) {
  * @param {string} json
  * @param {string | TaskRef} task
  * @param {TaskRef[]} [stubs]  the week's other tasks that are still stubs
+ * @param {Record<string, string[]> | null} [needs]  which tasks each test needs, measured when the week
+ *   was released (the hints file's "$tests"): a test that doesn't need this task isn't counted; one
+ *   that also needs a task still a stub waits for it. Tests it doesn't list fall back to the guesses.
+ * @param {boolean} [sandboxed]  run in Codex's sandbox: a test stopped by "listen EPERM" says nothing about the code (counted as blocked)
  */
-export function taskResults(json, task, stubs = []) {
+export function taskResults(json, task, stubs = [], needs = null, sandboxed = false) {
   const me = typeof task === "string" ? { id: task, file: "" } : task;
+  const stubbed = new Set(stubs.map((s) => s.id));
   const id = me.id;
   const named = (/** @type {string} */ text, /** @type {string | undefined} */ fn) => Boolean(fn && fn.length > 2 && new RegExp(`\\b${fn.replace(/\$/g, "\\$")}\\b`).test(text));
   /** Where a stack frame lands: inside which stubbed task's code. @param {string} stack */
@@ -3493,6 +4945,7 @@ export function taskResults(json, task, stubs = []) {
     return null;
   }
   let passed = 0;
+  let blocked = 0;
   /** @type {Set<string>} */
   const waiting = new Set();
   /** @type {{ test: string, message: string, own?: boolean }[]} */
@@ -3515,10 +4968,24 @@ export function taskResults(json, task, stubs = []) {
       else failures.push({ test: name, message: message.split("\n").slice(0, 6).join("\n") });
     }
     for (const t of file.assertionResults ?? []) {
+      const need = needs?.[`${name} > ${t.fullName ?? ""}`];
+      if (need) {
+        if (!need.includes(id)) continue; // not this task's test
+        const blocked = need.filter((n) => n !== id && stubbed.has(n));
+        if (blocked.length) {
+          if (t.status !== "passed") for (const n of blocked) waiting.add(n);
+          continue;
+        }
+      }
       if (t.status === "passed") passed++;
       else if (t.status === "failed") {
-        const message = (t.failureMessages ?? []).join("\n");
-        const waits = other(message, t.fullName ?? t.title ?? "");
+        const message = readableFailure((t.failureMessages ?? []).join("\n"));
+        if (sandboxed && /listen EPERM/.test(message)) {
+          blocked++;
+          continue;
+        }
+        // The measured needs cover this week's tasks; an earlier week's stub still shows as its TODO.
+        const waits = need ? ([...message.matchAll(/TODO\(week \d+: ([a-z0-9-]+)\)/g)].map((x) => x[1]).find((x) => x !== id) ?? null) : other(message, t.fullName ?? t.title ?? "");
         if (waits) waiting.add(waits);
         else {
           const test = t.fullName ?? t.title ?? name;
@@ -3530,7 +4997,7 @@ export function taskResults(json, task, stubs = []) {
   }
   // This task's own failures first: the test is named after its function, or the error came from its file.
   failures.sort((a, b) => Number(Boolean(b.own)) - Number(Boolean(a.own)));
-  return { passed, failed: failures.length, failures: failures.slice(0, 5), waiting: [...waiting] };
+  return { passed, failed: failures.length, failures: failures.slice(0, 5), waiting: [...waiting], ...(blocked ? { blocked } : {}) };
 }
 
 // ── The page (HTML, CSS and the browser code, all in this file) ────────────
@@ -3873,6 +5340,137 @@ button.sgroup.viewing { outline: 2px solid var(--mint); outline-offset: -2px; }
 .tab { font: 600 13.5px/1 "Inter", sans-serif; padding: 9px 14px; border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; background: none; cursor: pointer; color: var(--muted); }
 .tab.on { color: var(--ink); background: var(--panel); border-color: var(--line); margin-bottom: -1px; }
 .tabbody { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.framebar { display: flex; }
+.bdoneline { margin: 0 0 4px; font-size: 13.5px; color: var(--green); }
+.wswitch { margin-bottom: 8px; }
+.wpills { display: flex; flex-wrap: wrap; gap: 6px; }
+.wpill { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 11px; font: 600 12.5px/1.2 "Inter", sans-serif; color: var(--ink); cursor: pointer; }
+.wpill.today { border-color: var(--mint); }
+.wpill.on { background: var(--green); color: #fff; border-color: var(--green); }
+.wpill:disabled { opacity: .4; cursor: default; }
+.wselect { display: none; font: inherit; padding: 4px 6px; max-width: 100%; }
+@media (max-width: 700px) { .wpills { display: none; } .wselect { display: block; } }
+.cpane[data-pane="lesson"] { display: flex; flex-direction: column; gap: 6px; }
+.chatui:not([data-panel="lesson"]) .cpane[data-pane="lesson"] { display: none; }
+.chatui[data-panel="lesson"] .cpane[data-pane="viz"] { display: none; }
+.chatui[data-panel="lesson"] .ctab[data-cpane-tab="lesson"] { color: var(--ink); border-bottom-color: var(--green); }
+.ctab.fulllesson { margin-left: auto; text-decoration: none; }
+.agenttab { display: grid; gap: 12px; padding-bottom: 24px; min-width: 0; }
+.chatui { display: grid; gap: 10px; }
+/* The Build view takes the whole width: the course list hides while it's open. */
+.work:has(.chatui) { grid-template-columns: minmax(0, 1fr) !important; }
+.work:has(.chatui) .steps { display: none; }
+.ctop { display: flex; justify-content: space-between; align-items: center; gap: 16px; background: var(--green); color: #fff; border-radius: 10px; padding: 10px 14px; }
+.ctop .csub { color: #cfe8dc; font-size: 13px; }
+.cprog { display: grid; gap: 4px; min-width: 200px; font-size: 12.5px; text-align: right; }
+.ctop .bbar { background: rgba(255,255,255,.2); }
+.cgrid { --chat: 40%; display: grid; grid-template-columns: minmax(280px, var(--chat)) 10px minmax(0, 1fr); align-items: stretch; height: calc(100vh - 320px); min-height: 380px; }
+.ccol { min-width: 0; overflow-y: auto; padding-right: 6px; display: flex; flex-direction: column; }
+.ccol .agenttab { flex: 1; align-content: start; padding-bottom: 0; }
+.ccol .aglog { max-height: none; overflow: visible; }
+.cdiv { cursor: col-resize; display: grid; place-items: center; }
+.cdiv::after { content: ""; width: 3px; height: 32px; border-radius: 3px; background: var(--line); }
+.cpanel { min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); overflow: hidden; }
+.ctabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); padding: 6px 8px 0; }
+.ctab { border: 0; background: none; padding: 8px 10px; font: 600 13px/1 "Inter", sans-serif; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; }
+.cpane { flex: 1; overflow: auto; padding: 10px 12px; min-height: 0; }
+.cpane iframe.doc { min-height: 100%; height: calc(100vh - 360px); }
+.chatui:not([data-panel="notes"]) .cpane[data-pane="notes"], .chatui:not([data-panel="steps"]) .cpane[data-pane="steps"], .chatui:not([data-panel="files"]) .cpane[data-pane="files"], .chatui[data-panel="notes"] .cpane[data-pane="viz"], .chatui[data-panel="steps"] .cpane[data-pane="viz"], .chatui[data-panel="files"] .cpane[data-pane="viz"] { display: none; }
+.chatui:not([data-panel]) .cpane:not([data-pane="viz"]) { display: none; }
+.chatui[data-panel="viz"] .ctab[data-cpane-tab="viz"], .chatui:not([data-panel]) .ctab[data-cpane-tab="viz"], .chatui[data-panel="notes"] .ctab[data-cpane-tab="notes"], .chatui[data-panel="steps"] .ctab[data-cpane-tab="steps"], .chatui[data-panel="files"] .ctab[data-cpane-tab="files"] { color: var(--ink); border-bottom-color: var(--green); }
+.crow { display: flex; gap: 8px; padding: 6px 4px; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.crow.locked { opacity: .5; }
+.crow.now { background: #e3f2ea; border-radius: 6px; }
+.cpane h4 { margin: 10px 0 4px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.ccol .ag.you { display: flex; flex-direction: column; align-items: flex-end; }
+.ccol .ag.you .who, .ccol .ag.bot .who { display: none; }
+.ccol .ag.you .said { background: #e3f2ea; border-radius: 18px 18px 4px 18px; padding: 8px 14px; max-width: 85%; }
+.ccol .ag.bot .said { padding: 2px 0; }
+.ccol .agcomposer.pinned { position: sticky; bottom: 0; background: var(--panel); border: 2px solid var(--green); border-radius: 16px; padding: 8px 10px; margin-top: 10px; }
+.ccol .agcomposer.pinned textarea { border: 0; padding: 4px; }
+.cdisclaim { margin: 2px 0 0; font-size: 11.5px; color: var(--muted); text-align: center; }
+.build.guide .bcard { border: 1px solid var(--line); border-left: 3px solid var(--mint); box-shadow: none; border-radius: 10px; }
+@media (max-width: 900px) {
+  .cgrid { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .cdiv { display: none; }
+  .cpanel { order: -1; max-height: 50vh; }
+  .ccol { overflow: visible; }
+  .ctop { flex-direction: column; align-items: stretch; }
+  .cprog { text-align: left; }
+}
+.buildgrid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(320px, 1fr); gap: 18px; align-items: start; }
+.bside { display: grid; gap: 12px; position: sticky; top: 0; min-width: 0; }
+.bnotes { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; background: var(--panel); max-height: 45vh; overflow: auto; }
+.bnotes summary { font-weight: 700; cursor: pointer; }
+.bnotes table { border-collapse: collapse; font-size: 13px; width: 100%; }
+.bnotes th, .bnotes td { border: 1px solid var(--line); padding: 3px 6px; text-align: left; }
+.bnotes pre { white-space: pre-wrap; font-size: 12.5px; }
+.bboard { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; background: var(--panel); min-width: 0; }
+.bboard h3 { margin: 0 0 6px; font-size: 14px; }
+.bboard iframe.doc { min-height: 420px; }
+@media (max-width: 1100px) { .buildgrid { grid-template-columns: minmax(0, 1fr); } .bside { position: static; } }
+.build { display: grid; gap: 12px; }
+.bprogress { font: 600 12px/1.2 "JetBrains Mono", monospace; color: var(--muted); }
+.bsteps { display: flex; flex-wrap: wrap; gap: 6px; }
+.bstep { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 10px; font-size: 12.5px; display: inline-flex; gap: 6px; align-items: center; }
+.bstep.locked { opacity: .5; }
+.bhead { display: grid; gap: 8px; }
+.bhead h1 { margin: 0; }
+.bcomps { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+.bcomp { padding: 2px 8px; border-radius: 6px; background: var(--well); color: var(--muted); }
+.bcomp.now { background: var(--green); color: #fff; }
+.bcomp.done { color: var(--green); }
+.bbar { height: 8px; border-radius: 999px; background: var(--well); overflow: hidden; }
+.bbar i { display: block; height: 100%; background: var(--mint); }
+.bfinish h2 { color: var(--green); }
+.linkish { background: none; border: 0; padding: 0; color: var(--link, #1f7a55); text-decoration: underline; cursor: pointer; justify-self: start; font: inherit; font-size: 13.5px; }
+.bstep .n { font: 700 11px/1 "JetBrains Mono", monospace; color: var(--muted); }
+.bstep.done { background: var(--well); color: var(--muted); }
+.bstep.done .n { color: var(--green); }
+.bstep.now { border-color: var(--ink); box-shadow: 2px 2px 0 var(--ink); font-weight: 600; }
+
+.bcard { border: 2px solid var(--ink); border-radius: 12px; padding: 16px 18px; display: grid; gap: 10px; background: var(--panel); box-shadow: 4px 4px 0 var(--ink); }
+.bcard h2 { margin: 0; font-size: 20px; }
+.bcard .stuck.bad { margin: 0; padding: 8px 12px; border-left: 3px solid var(--red); background: var(--well); border-radius: 6px; }
+.bcard .eyebrow { margin: 0; }
+.bprompt pre { white-space: pre-wrap; font: 12.5px/1.5 "JetBrains Mono", monospace; background: var(--well); border-radius: 8px; padding: 10px; }
+.agbar { display: flex; justify-content: flex-end; font-size: 12.5px; min-height: 16px; }
+.agperms { margin: 0; padding: 8px 12px; background: var(--well); border-radius: 8px; font-size: 13px; line-height: 1.45; color: var(--muted); }
+.aglog { display: grid; gap: 10px; max-height: calc(100vh - 430px); min-height: 120px; overflow-y: auto; align-content: start; }
+.ag { min-width: 0; }
+.ag .who { font: 700 11px/1.2 "JetBrains Mono", monospace; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }
+.ag .said { white-space: pre-wrap; line-height: 1.5; overflow-wrap: anywhere; }
+.ag .said.md { white-space: normal; }
+.md p { margin: 0 0 8px; }
+.md ul, .md ol { margin: 0 0 8px; padding-left: 22px; display: block; }
+.md h3, .md h4, .md h5, .md h6 { margin: 10px 0 6px; font-size: 15px; }
+.md blockquote { margin: 0 0 8px; padding: 2px 10px; border-left: 3px solid var(--line); color: var(--muted); }
+.md code { font: 13px "JetBrains Mono", ui-monospace, Menlo, monospace; background: var(--well); padding: 1px 4px; border-radius: 4px; }
+.mdcode { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin: 0 0 8px; }
+.mdcodebar { display: flex; justify-content: space-between; align-items: center; padding: 3px 8px; background: var(--well); font: 600 11px "JetBrains Mono", monospace; color: var(--muted); }
+.mdcopy { border: 0; background: none; cursor: pointer; font: inherit; color: var(--link, #1f7a55); }
+.mdcode pre { margin: 0; padding: 8px 10px; overflow-x: auto; white-space: pre; }
+.mdcode pre code { background: none; padding: 0; }
+.mdtable { overflow-x: auto; margin: 0 0 8px; }
+.mdtable table { border-collapse: collapse; font-size: 13.5px; }
+.mdtable th, .mdtable td { border: 1px solid var(--line); padding: 3px 8px; text-align: left; }
+.ag.you .said { background: var(--well); border-radius: 8px; padding: 8px 12px; }
+.ag.note { font-size: 13.5px; color: var(--muted); }
+.ag.note.bad { color: var(--red); font-weight: 600; }
+.ag.ran { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13.5px; }
+.ag.ran summary { cursor: pointer; overflow-wrap: anywhere; }
+.ag.ran .what { font-weight: 600; }
+.ag.ran em, .agcard em { font-style: normal; color: var(--muted); font-size: 12.5px; }
+.ag pre.log, .agcard pre.log { max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agcard .row { margin-top: 10px; }
+.agworking { display: flex; gap: 8px; align-items: center; font-size: 13.5px; }
+.agenttab [hidden] { display: none !important; }
+.agcomposer { display: grid; gap: 8px; }
+.agcomposer select { max-width: 100%; font: inherit; padding: 3px 6px; }
+.agcomposer textarea { width: 100%; box-sizing: border-box; font: inherit; line-height: 1.45; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; resize: vertical; }
+.agfix { display: grid; gap: 8px; margin-top: 8px; }
+.agfix input { font: 15px/1.4 "JetBrains Mono", ui-monospace, Menlo, monospace; padding: 8px 10px; border: 2px solid var(--ink); border-radius: 8px; }
+.agfix .btn { justify-self: start; }
 .codetab { display: grid; gap: 22px; padding-bottom: 40px; }
 .task { border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; display: grid; gap: 12px; background: var(--panel); }
 .taskhead { display: flex; gap: 12px; align-items: flex-start; }
@@ -4056,7 +5654,7 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
   /** @type {number | null} */
   let viewingWeek = /^#week-(\d+)/.test(location.hash) ? Number(/^#week-(\d+)/.exec(location.hash)?.[1]) : null; // a week's view is open (its page, note, board)
   let focusShown = false; // npm start -- --week N: N's view opens once, when nothing before it is left to do
-  let weekTab = /^#week-\d+\/(\w+)$/.exec(location.hash)?.[1] ?? "page"; // the week view's tab: page, note, board, checks
+  let weekTab = /^#week-\d+\/(\w+)$/.exec(location.hash)?.[1] ?? ""; // "" = the week's first tab; the week view's tab: page, note, board, checks
   let detailHtml = ""; // what the main panel shows now (re-rendered only when it changes, so pages don't reload)
 
   // Back and forward: each view the student moves to (a week and its tab, the machine, a step looked
@@ -4065,12 +5663,12 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
   /** @returns {Nav} */
   const navNow = () => ({ week: viewingWeek, tab: weekTab, machine: machineOpen, step: viewing });
   /** @param {Nav} n */
-  const hashOf = (n) => (n.machine ? "#machine" : n.week !== null ? `#week-${n.week}${n.tab !== "page" ? `/${n.tab}` : ""}` : n.step !== null ? `#step-${n.step + 1}` : "");
+  const hashOf = (n) => (n.machine ? "#machine" : n.week !== null ? `#week-${n.week}${n.tab ? `/${n.tab}` : ""}` : n.step !== null ? `#step-${n.step + 1}` : "");
   /** @param {string} hash @returns {Nav} */
   const navOf = (hash) => {
     const week = /^#week-(\d+)(?:\/(\w+))?$/.exec(hash);
     const step = /^#step-(\d+)$/.exec(hash);
-    return { week: week ? Number(week[1]) : null, tab: week?.[2] ?? "page", machine: hash === "#machine", step: step ? Number(step[1]) - 1 : null };
+    return { week: week ? Number(week[1]) : null, tab: week?.[2] ?? "", machine: hash === "#machine", step: step ? Number(step[1]) - 1 : null };
   };
   /** After the student moves to another view: a new history entry, unless it's the same place. */
   function remember() {
@@ -4133,6 +5731,7 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
     snap = JSON.parse(/** @type {MessageEvent} */ (e).data);
     render();
   });
+  events.addEventListener("agent", (e) => agentTab.onEvent(JSON.parse(/** @type {MessageEvent} */ (e).data)));
   events.addEventListener("output", (e) => {
     const o = JSON.parse(/** @type {MessageEvent} */ (e).data);
     if (o.reset || o.id !== out.id) out = { id: o.id, text: "" };
@@ -4278,7 +5877,7 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
       const key = `account:${p.attempt}:${display}`;
       if (lineFor !== key) {
         lineFor = key;
-        line = lineStart(display);
+        line = { ...lineStart(display), typed: display };
         pasteNote = "";
       }
       return box(`<label class="cmd" data-cmdline><input class="sink" data-sink aria-label="Type: ${esc(a.display)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"><span class="cmdtext" data-cmdtext></span></label>
@@ -4360,15 +5959,17 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
         const key = `${step.id}:${v.attempt}:${v.index}:${display}`;
         if (lineFor !== key) {
           lineFor = key;
-          line = lineStart(display);
+          // Click to run: the command comes typed out, so it's one press of Run (or Enter). The studio still
+          // only runs the command this step planned, matched exactly (act "run").
+          line = { ...lineStart(display), typed: display };
           pasteNote = "";
         }
-        body = `${earlier}<div class="block"><h3>${esc(a.label || "Type this command")}</h3>
+        body = `${earlier}<div class="block"><h3>${esc(a.label || "Run this command")}</h3>
           <label class="cmd" data-cmdline><input class="sink" data-sink aria-label="Type: ${esc(a.display)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"><span class="cmdtext" data-cmdtext></span></label>
           <p class="cmdnote" data-cmdnote></p>
           <p class="what"><b>What this does:</b> ${esc(a.what)}</p>${words(a.words ?? [])}
           ${a.cwd || a.runs ? `<p class="runs">${a.cwd ? `Runs in <code>${esc(a.cwd)}</code>. ` : ""}${a.runs ? `The studio runs it as <code>${esc(a.runs)}</code>.` : ""}</p>` : ""}
-          ${a.pasteOk ? `<p class="runs">It's a long one, so you can paste it.</p>` : ""}</div>
+</div>
           ${skip ? `<div class="row">${skip}</div>` : ""}`;
       } else if (a.kind === "form" || a.kind === "folder") {
         /** @type {Field[]} */
@@ -4435,8 +6036,13 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
         <p class="why" style="margin-top:10px">Check back before Monday's class.</p></div>
         <p class="note">You can close this tab: the studio stops when you do.</p>`;
     if (snap.inWork) {
-      const home = snap.groups.find((g) => g.week === snap.week);
+      const home = snap.groups.find((g) => g.week === (snap.home || snap.week));
+      if (snap.home && snap.home !== snap.week) return `<div class="banner ok"><b>You're up to date.</b> Today: week ${esc(snap.home)}.</div>${home ? weekView(home) : ""}`;
       return `<div class="banner"><b>Week ${esc(snap.week)} is in your work.</b> Week ${esc(snap.next)} isn't out yet.</div>${home ? weekView(home) : ""}`;
+    }
+    if (snap.home && snap.home !== snap.week) {
+      const today = snap.groups.find((g) => g.week === snap.home);
+      return `<div class="banner ok"><b>You're up to date.</b> Everything the course has released is in your folder and on GitHub. Today: week ${esc(snap.home)}.</div>${today ? weekView(today) : ""}`;
     }
     const home = snap.groups.find((g) => g.week === snap.week);
     return `<div class="banner ok"><b>Week ${esc(snap.week)} is in your work!</b> ${esc(snap.arrived || `Week ${snap.week}'s files are in your folder, and on GitHub.`)}
@@ -4480,17 +6086,17 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
       <div class="row"><button class="btn ghost" data-do="m-close">Back to the summary</button></div>`;
   }
 
-  /** One week's heading in the list: its number, title, and where it stands. @param {{ week: number, title: string, status: string }} g */
+  /** One week's heading in the list: its number, title, and where it stands. @param {{ week: number, title: string, status: string, label?: string, update?: boolean }} g */
   function weekHeading(g) {
-    const note = g.update ? "get the update" : ({ setup: "", done: "done", inwork: "in your work", get: "get it now", later: "after this one", future: "not out yet" }[g.status] ?? "");
-    const inner = `<span>Week ${esc(g.week)} · ${esc(g.title)}${g.update ? " · update" : ""}</span>${note ? `<em>${esc(note)}</em>` : ""}`;
+    const note = g.update ? "get the update" : g.week === snap?.home && g.status !== "get" ? "today" : ({ setup: "", done: "done", inwork: "in your work", get: "get it now", later: "after this one", future: "not out yet", open: "open" }[g.status] ?? "");
+    const inner = `<span>${g.label ? esc(g.label) : `Week ${esc(g.week)} · ${esc(g.title)}`}${g.update ? " · update" : ""}</span>${note ? `<em>${esc(note)}</em>` : ""}`;
     // A week that's in opens its home: its page, note and board.
     return weekIsIn(g) ? `<button class="sgroup ${g.status} open ${viewingWeek === g.week ? "viewing" : ""}" data-do="week" data-w="${g.week}" title="Open week ${g.week}">${inner}</button>` : `<div class="sgroup ${g.status}">${inner}</div>`;
   }
 
   /** In the student's work, so its page and board can open. @param {{ status: string }} g */
   function weekIsIn(g) {
-    return ["setup", "done", "inwork"].includes(g.status) || (g.status === "get" && !!snap && snap.current >= snap.total);
+    return ["setup", "done", "inwork", "open"].includes(g.status) || (g.status === "get" && !!snap && snap.current >= snap.total);
   }
 
   /**
@@ -4505,6 +6111,13 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
    * the file and runs the task's tests. The editors are made once per week and kept while the page
    * redraws; what's typed and not saved yet survives switching tabs.
    */
+  /** From a Code card to the Agent tab, with its prompt in the box. @param {string} task @param {string} prompt */
+  function goToAgent(task, prompt) {
+    agentTab.prefill(task, prompt);
+    weekTab = "agent";
+    remember();
+    render();
+  }
   const codeTab = (() => {
     /** @typedef {{ id: string, file: string, part: string, description: string, before: string[], after: string[], indent: string, body: string, rev: string, lesson: string, prompt: string, tests: string[], line: number, stubbed: boolean, hint: string, steps: { line: number, explain: string }[], words: string[], members: string[] }} Task */
     /** The hint text shows unless the student hid it (remembered on this laptop). */
@@ -4516,6 +6129,16 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
     }
     /** @type {Record<string, string>} what's typed and not saved, by task */
     const drafts = {};
+    /** @type {Record<string, string>} which version of the task in the file each draft was typed over */
+    const draftRevs = {};
+    const setDraft = (/** @type {{ id: string, rev: string }} */ t, /** @type {string} */ text) => {
+      drafts[t.id] = text;
+      draftRevs[t.id] = t.rev;
+    };
+    const dropDraft = (/** @type {string} */ id) => {
+      delete drafts[id];
+      delete draftRevs[id];
+    };
     /** @type {{ week: number, el: HTMLElement, tasks: Task[], editors: Record<string, { value: string, focus: () => void, showHint?: (show: boolean) => void }> } | null} */
     let mounted = null;
     /** @type {Promise<void> | null} */
@@ -4524,6 +6147,7 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
       esc(text)
         .replace(/`([^`]+)`/g, "<code>$1</code>")
         .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+        .replace(/\*([^*\s][^*]*)\*/g, "<i>$1</i>")
         .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
     /** CodeMirror from /editor.js, loaded once; a plain text box when it isn't there. */
     function loadEditor() {
@@ -4550,7 +6174,7 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
           words: t.words,
           members: t.members,
           onChange: (/** @type {string} */ text) => {
-            drafts[t.id] = text;
+            setDraft(t, text);
             markStep(t, text);
           },
           onSave: save,
@@ -4565,12 +6189,12 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
       area.value = doc;
       if (t.hint && hintsShown) area.placeholder = t.hint;
       area.rows = Math.max(6, doc.split("\n").length + 2);
-      area.addEventListener("input", () => (drafts[t.id] = area.value));
+      area.addEventListener("input", () => setDraft(t, area.value));
       area.addEventListener("keydown", (e) => {
         if (e.key === "Tab") {
           e.preventDefault();
           area.setRangeText("  ", area.selectionStart, area.selectionEnd, "end");
-          drafts[t.id] = area.value;
+          setDraft(t, area.value);
         } else if ((e.metaKey || e.ctrlKey) && e.key === "s") {
           e.preventDefault();
           save();
@@ -4607,14 +6231,14 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
         ? `<aside class="prompt walk"><h4>What this code does</h4><ol>${t.steps.map((st, i) => `<li data-step="${i}" data-line="${st.line}">${md(st.explain)}</li>`).join("")}</ol></aside>`
         : "";
       const prompt = t.prompt
-        ? `<aside class="prompt"><h4>Codex prompt</h4><p class="sub">Run <code>codex</code> in a terminal in your course folder and paste this; read what it writes before you keep it.</p><pre>${esc(t.prompt)}</pre><button class="btn ghost" data-code-copy="${esc(t.id)}">Copy the prompt</button></aside>`
+        ? `<aside class="prompt"><h4>Codex prompt</h4><p class="sub">Send it to the Agent tab (add your approach first), or run <code>codex</code> in a terminal in your course folder and paste it. Read what it writes before you keep it.</p><pre>${esc(t.prompt)}</pre><div class="row"><button class="btn" data-code-agent="${esc(t.id)}">Send to the agent</button><button class="btn ghost" data-code-copy="${esc(t.id)}">Copy the prompt</button></div></aside>`
         : "";
       return `<section class="task" data-task="${esc(t.id)}">
         <div class="taskhead"><span class="tnum">${n}</span><div><h3><code>${esc(t.id)}</code></h3><p class="tdesc">${esc(t.description)}</p></div><span class="tpart ${t.part}">${t.part === "class" ? "in class" : "take-home"}</span></div>
         ${t.lesson ? `<p class="lesson">${md(t.lesson)}</p>` : ""}
         <div class="taskgrid ${prompt || walk ? "withprompt" : ""}"><div class="codewrap"><div class="cfile">${esc(where)}</div>${ctx(t.before)}<div class="editor" style="margin-left:${t.indent.length}ch" data-ed="${esc(t.id)}"></div>${ctx(t.after)}</div>${walk || prompt ? `<div class="aside">${walk}${prompt}</div>` : ""}</div>
         ${t.hint ? `<div class="row hintrow"><span class="muted" data-hint-says>${hintsShown ? "Type over the grey code, or press <kbd>Tab</kbd> for its next word; any code that passes the tests is fine." : "The hint is hidden. <kbd>Tab</kbd> after a letter or a dot lists the names that fit."}</span><button class="btn ghost" data-code-paste="${esc(t.id)}">Paste it all</button><button class="btn ghost" data-code-hints>${hintsShown ? "Hide the hint" : "Show the hint"}</button></div>` : ""}
-        <div class="row"><button class="btn primary" data-code-save="${esc(t.id)}">Save and run its tests <kbd>⌘S</kbd></button><span class="muted">Writes only this task into <code>${esc(t.file)}</code>, then runs <code>${esc(t.tests.join(" "))}</code>.</span></div>
+        <div class="row"><button class="btn primary" data-code-save="${esc(t.id)}">Save and run its tests <kbd>⌘S</kbd></button><button class="btn" data-code-test="${esc(t.id)}">Run its tests</button>${t.prompt ? "" : `<button class="btn" data-code-agent="${esc(t.id)}">Ask the agent</button>`}<span class="muted">Save writes only this task into <code>${esc(t.file)}</code>, then runs <code>${esc(t.tests.join(" "))}</code>.</span></div>
         <div class="tresult" data-result="${esc(t.id)}"></div>
       </section>`;
     }
@@ -4629,6 +6253,8 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
         return;
       }
       mine.tasks = res.tasks;
+      // A card always opens on what's in the file: typing over an older version doesn't survive it.
+      for (const t of mine.tasks) if (draftRevs[t.id] !== undefined && draftRevs[t.id] !== t.rev) dropDraft(t.id);
       if (!mine.tasks.length) {
         el.innerHTML = `<p class="why">There's no code to write this week: the work is in your design note.</p>`;
         return;
@@ -4654,17 +6280,43 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
       }
       t.rev = r.rev ?? t.rev;
       t.body = body;
-      delete drafts[id];
+      t.stubbed = false;
+      dropDraft(id);
     }
     /** @param {string} id */
     function reload(id) {
-      delete drafts[id];
+      dropDraft(id);
       if (mounted) {
         const { week, el } = mounted;
         mounted = null;
         void mount(week, el);
       }
     }
+    /**
+     * The file may have changed (the agent's turn ended, or the student came back from VS Code):
+     * cards show it, unless there's unsaved typing, which then gets a Reload and is never overwritten.
+     */
+    async function refresh() {
+      const m = mounted;
+      if (!m?.tasks.length) return;
+      const res = await fetch(`/api/code?week=${m.week}`, { headers: { "x-studio-token": TOKEN } }).then((r) => r.json()).catch(() => null);
+      if (mounted !== m || !res?.tasks) return;
+      for (const fresh of res.tasks) {
+        const t = m.tasks.find((x) => x.id === fresh.id);
+        const ed = m.editors[fresh.id];
+        if (!t || !ed || t.rev === fresh.rev) continue;
+        if (drafts[t.id] !== undefined && drafts[t.id] !== t.body) {
+          const box = m.el.querySelector(`[data-result="${CSS.escape(t.id)}"]`);
+          if (box) box.innerHTML = `<div class="status bad"><span class="icon">!</span><div><b>This task changed in the file (Codex or VS Code). What you typed here isn't saved.</b><div class="row"><button class="btn ghost" data-code-reload="${esc(t.id)}">Reload it from the file</button></div></div></div>`;
+          continue;
+        }
+        Object.assign(t, fresh);
+        ed.value = fresh.hint && fresh.stubbed ? "" : fresh.body;
+        dropDraft(t.id);
+      }
+    }
+    window.addEventListener("focus", () => void refresh());
+
     /** Results and commits, from the studio's state. */
     function update() {
       if (!mounted || !snap) return;
@@ -4672,15 +6324,18 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
         const box = mounted.el.querySelector(`[data-result="${CSS.escape(t.id)}"]`);
         const r = snap.code?.[t.id];
         if (!box || !r) continue;
-        const waiting = r.waiting?.length ? `<div class="sub">${esc(r.waiting.length === 1 ? "Some tests also need" : "Some tests also need these tasks")}: ${r.waiting.map((w) => `<code>${esc(w)}</code>`).join(", ")} (not done yet, so they don't count against this one).</div>` : "";
+        const socket = r.blocked ? `<div class="sub">${esc(r.blocked)} more open a local socket, so they only run with Run its tests.</div>` : "";
+        const waiting = r.blocked && !r.waiting?.length ? socket : r.waiting?.length ? `${socket}<div class="sub">${esc(r.waiting.length === 1 ? "Some tests also need" : "Some tests also need these tasks")}: ${r.waiting.map((w) => `<code>${esc(w)}</code>`).join(", ")} (not done yet, so they don't count against this one).</div>` : "";
         let html = "";
-        if (r.phase === "running") html = `<div class="status run"><i class="spin"></i><div><b>Saved. Running ${esc(t.tests.join(" "))}…</b></div></div>`;
+        if (r.phase === "running") html = `<div class="status run"><i class="spin"></i><div><b>Running ${esc(t.tests.join(" "))}…</b></div></div>`;
         else if (r.phase === "error") html = `<div class="status bad"><span class="icon">!</span><div><b>The tests couldn't run.</b><pre class="log">${esc(r.error)}</pre></div></div>`;
         else if (r.phase === "failed")
           html = `<div class="status bad"><span class="icon">!</span><div><b>${r.failed} test${r.failed === 1 ? "" : "s"} fail${r.failed === 1 ? "s" : ""} (${r.passed} pass).</b>${r.waiting?.length ? `<div class="sub">Tests that need unfinished tasks are left out, but one of these may still come from them.</div>` : ""}${(r.failures ?? []).map((f) => `<div class="failure"><div class="ftest">${esc(f.test)}${f.own ? ` <span class="muted">(this task)</span>` : ""}</div><pre class="log">${esc(f.message)}</pre></div>`).join("")}${waiting}</div></div>`;
         else if (r.phase === "passed") {
           const commit = `git commit -m "week ${mounted.week}: ${t.id}" -- ${t.file}`;
-          html = `<div class="status ok"><span class="icon">✓</span><div><b>Its tests pass (${r.passed}).</b>${waiting}</div></div>
+          const none = !r.passed;
+          const said = none ? (r.waiting?.length ? "Nothing to check yet: every test of this task also needs another one (below)." : "No test checks this task: look at it on the board.") : `Its tests pass (${r.passed}).`;
+          html = `<div class="status ok"><span class="icon">✓</span><div><b>${said}</b>${waiting}</div></div>
             ${r.committed ? `<div class="status ok"><span class="icon">✓</span><div><b>${esc(r.committed)}</b></div></div>` : `<div class="row"><button class="btn primary" data-code-commit="${esc(t.id)}">Commit it</button><code class="muted">${esc(commit)}</code></div><p class="muted">It commits the whole file, with anything else you changed in it.</p>`}`;
         }
         if (box.innerHTML !== html) box.innerHTML = html;
@@ -4698,15 +6353,19 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
       else update();
     }
     document.addEventListener("click", (e) => {
-      const el = /** @type {HTMLElement} */ (e.target).closest("[data-code-save],[data-code-commit],[data-code-copy],[data-code-reload],[data-code-paste],[data-code-hints]");
+      const el = /** @type {HTMLElement} */ (e.target).closest("[data-code-save],[data-code-test],[data-code-commit],[data-code-copy],[data-code-agent],[data-code-reload],[data-code-paste],[data-code-hints]");
       if (!(el instanceof HTMLElement) || !mounted) return;
-      if (el.dataset.codeSave) void save(el.dataset.codeSave);
+      if (el.dataset.codeAgent) {
+        const t = mounted.tasks.find((x) => x.id === el.dataset.codeAgent);
+        if (t) goToAgent(t.id, t.prompt);
+      } else if (el.dataset.codeTest) void ask({ type: "code-test", week: mounted.week, id: el.dataset.codeTest }).then((/** @type {any} */ r) => r.ok || toast(r.error ?? "That didn't run."));
+      else if (el.dataset.codeSave) void save(el.dataset.codeSave);
       else if (el.dataset.codePaste) {
         const t = mounted.tasks.find((x) => x.id === el.dataset.codePaste);
         const ed = t && mounted.editors[t.id];
         if (t && ed) {
           ed.value = t.hint;
-          drafts[t.id] = t.hint;
+          setDraft(t, t.hint);
           ed.focus();
         }
       } else if (el.dataset.codeHints !== undefined) {
@@ -4728,24 +6387,589 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
         if (t) void navigator.clipboard?.writeText(t.prompt).then(() => toast("Copied: paste it into Codex."), () => toast("Select the prompt and copy it."));
       }
     });
-    return { sync };
+    return { sync, refresh };
   })();
+
+  /**
+   * The Agent tab: talk to the student's own Codex. Node owns everything; this draws a snapshot and
+   * applies its numbered events, and if it misses one it asks for the snapshot again. Refreshing the
+   * page only redraws: nothing is ever sent again from here.
+   */
+  const agentTab = (() => {
+    /** @type {any} */
+    let state = null;
+    let draft = "";
+    let selected = "";
+    /** @type {{ week: number, el: HTMLElement, tasks: { id: string, week: number, description: string }[] } | null} */
+    let mounted = null;
+    let focusBox = false;
+    let chatPanel = "viz"; // the right panel's tab in the Build view
+    /** @type {Set<any>} entries with deltas waiting for the next frame */
+    const dirty = new Set();
+    let painting = false;
+    const clientId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const md = (/** @type {string} */ text) => esc(text).replace(/`([^`\n]+)`/g, "<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+
+    /** @param {any} e */
+    function entryHtml(e) {
+      if (e.kind === "user") return `<div class="ag you" data-entry="${esc(e.id)}"><div class="who">You</div><div class="said">${md(e.text)}</div></div>`;
+      if (e.kind === "agent") return `<div class="ag bot" data-entry="${esc(e.id)}"><div class="who">Codex</div><div class="said md" data-field="text">${chatMarkdown(e.text)}</div></div>`;
+      if (e.kind === "note") return `<div class="ag note ${esc(e.tone)}" data-entry="${esc(e.id)}">${md(e.text)}${e.commit ? `<div class="row"><button class="btn primary" data-agent-commit="${esc(e.commit.id)}" data-w="${esc(e.commit.week)}">Commit it</button></div>` : ""}${e.runTests ? `<div class="row"><button class="btn primary" data-agent-test="${esc(e.runTests.id)}" data-w="${esc(e.runTests.week)}">Run its tests</button></div>` : ""}</div>`;
+      if (e.kind === "command") {
+        const status = e.status === "completed" ? (e.exitCode ? `exit ${esc(e.exitCode)}` : "done") : e.status === "inProgress" ? "running…" : esc(e.status);
+        return `<details class="ag ran" data-entry="${esc(e.id)}"><summary><span class="what">Ran</span> <code>${esc(plainCommand(e.command))}</code> <em>${status}</em></summary><pre class="log" data-field="output">${esc(e.output)}</pre></details>`;
+      }
+      if (e.kind === "file") {
+        const list = (e.changes ?? []).map((/** @type {any} */ c) => `<div><code>${esc(c.path)}</code>${c.movePath ? ` moves to <code>${esc(c.movePath)}</code>` : ""} <em>${esc(c.kind)}</em></div>`).join("");
+        const diffs = (e.changes ?? []).map((/** @type {any} */ c) => c.diff).filter(Boolean).join("\n");
+        return `<details class="ag ran" data-entry="${esc(e.id)}"><summary><span class="what">${e.status === "declined" ? "Declined change" : e.status === "failed" ? "Failed change" : "Changed"}</span> ${list || "files"}</summary>${diffs ? `<pre class="log">${esc(diffs)}</pre>` : ""}</details>`;
+      }
+      return "";
+    }
+
+    /** @param {any} c */
+    function cardHtml(c) {
+      const what = c.kind === "command" ? `<b>Codex wants to run this:</b><pre class="log">${esc(plainCommand(c.command))}</pre>${c.cwd ? `<div class="sub">in <code>${esc(c.cwd)}</code></div>` : ""}` : `<b>Codex wants to change files${c.grantRoot ? ` under ${esc(c.grantRoot)}` : ""}:</b>${(c.changes ?? []).map((/** @type {any} */ f) => `<div><code>${esc(f.path)}</code>${f.movePath ? ` moves to <code>${esc(f.movePath)}</code>` : ""} <em>${esc(f.kind)}</em></div>`).join("")}${(c.changes ?? []).some((/** @type {any} */ f) => f.diff) ? `<pre class="log">${esc(c.changes.map((/** @type {any} */ f) => f.diff).join("\n"))}</pre>` : ""}`;
+      return `<div class="status wait agcard"><span class="icon">?</span><div>${what}${c.reason ? `<div class="sub">Why: ${esc(c.reason)}</div>` : ""}<div class="row"><button class="btn primary" data-agent-answer="accept" data-key="${esc(c.key)}">Approve</button><button class="btn" data-agent-answer="decline" data-key="${esc(c.key)}">Decline</button></div></div></div>`;
+    }
+
+    /** What's wrong, and the fix right here. */
+    function statusHtml() {
+      const s = state;
+      if (!s || s.phase === "off" || s.phase === "starting") return `<div class="status run"><i class="spin"></i><div><b>Starting Codex…</b><div class="sub">The first time on a Mac, macOS checks it first: this can take a few minutes.</div></div></div>`;
+      if (s.phase === "missing" || s.phase === "too-old") {
+        const running = s.fix?.phase === "running";
+        return `<div class="status bad"><span class="icon">!</span><div><b>${esc(s.problem)}</b><div class="sub">Type this to ${s.phase === "missing" ? "install it" : "update it"}, then the studio checks again.</div></div></div>
+          <form class="agfix" data-agent-fix><div class="cmd doneline"><span class="p">$</span>${esc(s.fixCommand)}</div><button class="btn primary" type="submit" ${running ? "disabled" : ""}>${running ? "Running…" : "Run it"}</button></form>
+          ${s.fix?.out ? `<pre class="log">${esc(s.fix.out)}</pre>` : ""}`;
+      }
+      if (s.phase === "signed-out") return `<div class="status bad"><span class="icon">!</span><div><b>Codex isn't signed in.</b>${s.problem ? `<div class="sub">${esc(s.problem)}</div>` : ""}<div class="sub">It signs in with your ChatGPT account, in your browser. The studio never sees your password or token.</div></div></div><div class="row"><button class="btn primary" data-agent-login>Sign in to Codex</button></div>`;
+      if (s.phase === "signing-in") return `<div class="status wait"><i class="spin"></i><div><b>Finish signing in in your browser.</b><div class="sub"><a href="${esc(s.loginUrl)}" target="_blank" rel="noopener noreferrer">Open the sign-in page</a>. This page carries on by itself once it's done.</div></div></div>`;
+      if (s.phase === "ready" && s.account?.type === "chatgpt" && s.account.planType === "free")
+        return `<div class="status bad"><span class="icon">!</span><div><b>Your ChatGPT account${s.account.email ? ` (${esc(s.account.email)})` : ""} is on the Free plan.</b><div class="sub">Free includes Codex only for quick tasks, so you'll most likely reach its limit partway through a step. The course uses ChatGPT Plus: upgrade to Plus at <a href="https://chatgpt.com/#pricing" target="_blank" rel="noopener noreferrer">chatgpt.com</a> with this account, then press Check again. You can still send messages below until then. Signed in with the wrong account? Run <code>codex logout</code> in a terminal, then start the studio again.</div></div></div><div class="row"><button class="btn primary" data-agent-recheck>Check again</button></div>`;
+      if (s.phase === "failed") return `<div class="status bad"><span class="icon">!</span><div><b>${esc(s.problem || "Codex stopped.")}</b></div></div><div class="row"><button class="btn primary" data-agent-open>Start Codex again</button></div>`;
+      if (s.phase === "unavailable") return `<div class="status bad"><span class="icon">!</span><div><b>${esc(s.problem)}</b></div></div>`;
+      return "";
+    }
+
+    /** The part that changes with the state (not the composer, so typing isn't disturbed). */
+    function paintState() {
+      if (!mounted) return;
+      const s = state;
+      const top = /** @type {HTMLElement} */ (mounted.el.querySelector("[data-agent-status]"));
+      const cards = /** @type {HTMLElement} */ (mounted.el.querySelector("[data-agent-cards]"));
+      const focusedFix = document.activeElement instanceof HTMLInputElement && document.activeElement.name === "agentfix";
+      const html = statusHtml();
+      if (top.dataset.html !== html) {
+        top.innerHTML = html;
+        top.dataset.html = html;
+        if (focusedFix) /** @type {HTMLElement | null} */ (top.querySelector("input"))?.focus();
+      }
+      const cardsHtml = (s?.cards ?? []).map(cardHtml).join("");
+      if (cards.dataset.html !== cardsHtml) {
+        cards.innerHTML = cardsHtml;
+        cards.dataset.html = cardsHtml;
+        if (cardsHtml) cards.scrollIntoView({ block: "nearest" });
+      }
+      const ready = s?.phase === "ready";
+      const busy = Boolean(s?.turn);
+      const composer = /** @type {HTMLElement} */ (mounted.el.querySelector("[data-agent-composer]"));
+      // In a build week the walkthrough leads; the free-form box opens from its link.
+      composer.hidden = !ready;
+      /** @type {HTMLButtonElement} */ (mounted.el.querySelector("[data-agent-send]")).disabled = busy;
+      const stop = /** @type {HTMLButtonElement} */ (mounted.el.querySelector("[data-agent-stop]"));
+      stop.hidden = !busy;
+      stop.disabled = s?.turn?.status === "stopping";
+      stop.textContent = s?.turn?.status === "stopping" ? "Stopping…" : "Stop";
+      const line = /** @type {HTMLElement} */ (mounted.el.querySelector("[data-agent-working]"));
+      line.hidden = !busy;
+      const who = /** @type {HTMLElement} */ (mounted.el.querySelector("[data-agent-who]"));
+      who.textContent = ready ? `Codex ${s.version}${s.account?.email ? ` · ${s.account.email}` : ""}` : "";
+      /** @type {HTMLElement} */ (mounted.el.querySelector("[data-agent-perms]")).textContent = s?.permissions ?? "";
+    }
+
+    /** @param {any} entry */
+    function paintEntry(entry) {
+      const log = mounted?.el.querySelector("[data-agent-log]");
+      if (!log) return;
+      const html = entryHtml(entry);
+      const old = log.querySelector(`[data-entry="${CSS.escape(entry.id)}"]`);
+      if (!html) return;
+      const nearEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+      if (old) {
+        const open = old instanceof HTMLDetailsElement && old.open;
+        old.outerHTML = html;
+        if (open) log.querySelector(`[data-entry="${CSS.escape(entry.id)}"]`)?.setAttribute("open", "");
+      } else log.insertAdjacentHTML("beforeend", html);
+      if (nearEnd) log.scrollTop = log.scrollHeight;
+    }
+
+    function paintAll() {
+      if (!mounted || !state) return;
+      const log = /** @type {HTMLElement} */ (mounted.el.querySelector("[data-agent-log]"));
+      log.innerHTML = (state.entries ?? []).map(entryHtml).join("");
+      log.scrollTop = log.scrollHeight;
+      paintState();
+    }
+
+    async function refetch() {
+      try {
+        const res = await fetch("/api/agent", { headers: { "x-studio-token": TOKEN } });
+        if (res.ok) {
+          state = await res.json();
+          paintAll();
+        }
+      } catch {
+        // the next event tries again
+      }
+    }
+
+    /** One message from the studio's event stream. @param {any} e */
+    function onEvent(e) {
+      if (e.type === "snapshot") {
+        state = e.snapshot;
+        return paintAll();
+      }
+      if (!state) return;
+      if (e.seq <= state.seq) return;
+      if (e.seq !== state.seq + 1) return void refetch();
+      state.seq = e.seq;
+      if (e.type === "state") {
+        const entries = state.entries;
+        const wasWorking = Boolean(state.turn);
+        state = { ...e.state, entries, seq: e.seq };
+        paintState();
+        if (wasWorking && !state.turn) {
+          codeTab.refresh(); // the agent may have changed the file
+          if (mounted) void loadBuild(mounted);
+        }
+        paintBuild();
+      } else if (e.type === "entry") {
+        const at = state.entries.findIndex((/** @type {any} */ x) => x.id === e.entry.id);
+        if (at >= 0) state.entries[at] = e.entry;
+        else state.entries.push(e.entry);
+        paintEntry(e.entry);
+      } else if (e.type === "delta") {
+        const entry = state.entries.find((/** @type {any} */ x) => x.id === e.id);
+        if (!entry) return;
+        // Bounded, and drawn at most once a frame: a noisy command can't freeze the page (or Stop).
+        entry[e.field] = `${entry[e.field] ?? ""}${e.text}`.slice(e.field === "output" ? -20000 : -200000);
+        dirty.add(entry);
+        if (!painting) {
+          painting = true;
+          requestAnimationFrame(() => {
+            painting = false;
+            for (const x of dirty) paintEntry(x);
+            dirty.clear();
+          });
+        }
+      }
+    }
+
+    // ── The Build list: the week's steps, one at a time (concept, one-click prompt, its result, Commit) ──
+    /** @type {any[]} */
+    let buildList = [];
+    // Done: committed as it is, or its tests pass with nothing left to commit.
+    const stepDone = (/** @type {any} */ st) => {
+      const r = snap?.code?.[st.id];
+      // (Its tests can pass with the region still the stub: the code went in elsewhere in the file.)
+      return st.committed || Boolean(r?.done) || Boolean(r?.phase === "passed" && r.passed > 0 && r.rev === st.rev && !st.dirty);
+    };
+    /** @param {{ week: number, el: HTMLElement }} m */
+    async function loadBuild(m) {
+      const res = await fetch(`/api/build?week=${m.week}`, { headers: { "x-studio-token": TOKEN } }).then((r) => r.json()).catch(() => null);
+      if (mounted !== m) return;
+      buildList = res?.steps ?? [];
+      paintBuild();
+      // Steps already green (written another way, or in one go with an earlier one) are skipped.
+      void act({ type: "build-check", week: m.week });
+    }
+    function currentBuildStep() {
+      return buildList.find((st) => !stepDone(st)) ?? null;
+    }
+    /** The components, in order, each with its steps. */
+    function components() {
+      /** @type {{ c: any, steps: any[] }[]} */
+      const out = [];
+      for (const st of buildList) {
+        const last = out[out.length - 1];
+        if (last && last.c.id === st.component.id) last.steps.push(st);
+        else out.push({ c: st.component, steps: [st] });
+      }
+      return out;
+    }
+    /** Finish screens already seen, on this laptop: the walkthrough then goes on to the next component. */
+    const seenKey = (/** @type {string} */ id) => `netsim-built:${mounted?.week}:${id}`;
+    const seen = (/** @type {string} */ id) => {
+      try {
+        return localStorage.getItem(seenKey(id)) === "1";
+      } catch {
+        return true;
+      }
+    };
+    /** The result line for a step: from the studio's own test run of its task. @param {any} st */
+    function buildResult(st) {
+      const r = snap?.code?.[st.id];
+      if (stepDone(st)) return `<div class="status ok"><span class="icon">✓</span><div><b>Done and committed.</b></div></div>`;
+      if (!r && !st.stubbed && st.testNote) return `<p class="muted">Written. No test checks this one yet: read the change, then</p><div class="row"><button class="btn primary" data-build-commit="${esc(st.id)}" data-w="${esc(st.week)}">Commit it</button></div>`;
+      if (!r) return st.stubbed ? `<p class="muted">Press Send to the agent. Read what Codex changes; the studio checks it when Codex finishes.</p>` : `<p class="muted">Written, not checked yet: press Run its tests.</p>`;
+      if (r.phase === "running") return `<div class="status run"><i class="spin"></i><div><b>Checking ${esc(st.id)}…</b></div></div>`;
+      if (r.phase === "error") return `<div class="status bad"><span class="icon">!</span><div><b>The tests couldn't run.</b></div></div>`;
+      if (r.phase === "failed") return `<div class="status bad"><span class="icon">!</span><div><b>${esc(r.failed)} of its tests fail.</b><div class="sub">${esc(r.failures?.[0]?.test ?? "")}: ${esc(String(r.failures?.[0]?.message ?? "").split("\n")[0])}</div><div class="sub">Tell Codex what you see (Ask the agent something else, below), or press Run its tests after a change.</div></div></div>`;
+      const todo = r.waiting?.length ? ` Waiting on: ${r.waiting.join(", ")}.` : "";
+      return `<div class="status ok"><span class="icon">✓</span><div><b>${r.passed ? `${esc(r.passed)} test${r.passed === 1 ? "" : "s"} pass.` : "Nothing fails."}</b>${todo ? `<div class="sub">${esc(todo)}</div>` : ""}</div></div>
+        <div class="row"><button class="btn primary" data-build-commit="${esc(st.id)}" data-w="${esc(st.week)}">Commit it</button><span class="muted">It commits the whole file.</span></div>`;
+    }
+    /** Its tests pass as the code is now (left to commit, if it isn't done): no Send. @param {any} st */
+    const greenNow = (st) => snap?.code?.[st.id]?.phase === "passed" && snap.code[st.id].rev === st.rev;
+    /** @param {any} st */
+    function stepCard(st) {
+      return `<section class="bcard">
+          <p class="eyebrow">Step ${esc(st.n)} · ${esc(String(st.id).toUpperCase())}${st.week !== mounted?.week ? ` · from week ${esc(st.week)}` : ""} · <code>${esc(st.id)}</code>${st.file ? ` in <code>${esc(st.file)}</code>` : ""}</p>
+          <h2>${esc(st.title || st.id)}</h2>
+          ${st.concept ? `<p class="lesson">${esc(st.concept).replace(/`([^`\n]+)`/g, "<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")}</p>` : ""}
+          ${st.prompt ? `<details class="bprompt"><summary>What it sends to the agent</summary><pre>${esc(st.prompt)}</pre></details>` : ""}
+          <div class="row">${st.prompt && st.found && !stepDone(st) && !greenNow(st) ? `<button class="btn primary" data-build-send="${esc(buildList.indexOf(st))}" ${state?.phase !== "ready" || state?.turn ? "disabled" : ""}>Send to the agent</button>` : ""}${st.found && !stepDone(st) ? `<button class="btn" data-build-test="${esc(st.id)}" data-w="${esc(st.week)}">Run its tests</button>` : ""}</div>
+          ${st.found ? buildResult(st) : `<p class="muted">This step's code isn't in your folder yet.</p>`}
+          ${st.stuck ? `<p class="${snap?.code?.[st.id]?.phase === "failed" ? "stuck bad" : "muted"}"><b>Stuck?</b> ${esc(st.stuck).replace(/`([^`\n]+)`/g, "<code>$1</code>")}</p>` : ""}
+          ${st.ask ? `<p class="muted"><b>Ask yourself:</b> ${esc(st.ask).replace(/`([^`\n]+)`/g, "<code>$1</code>")}</p>` : ""}
+        </section>`;
+    }
+    function paintBuild() {
+      const box = /** @type {HTMLElement | null} */ (mounted?.el.querySelector("[data-build]") ?? null);
+      if (!box || !buildList.length) return;
+      const all = components();
+      // The component being built: the first with a step left, unless one just finished whose finish
+      // screen hasn't been seen yet.
+      const finished = all.find((x) => x.steps.every(stepDone) && !seen(x.c.id) && x.c.id);
+      const building = all.find((x) => x.steps.some((st) => !stepDone(st)));
+      const now = finished ?? building ?? all[all.length - 1];
+      const st = finished ? null : currentBuildStep();
+      // The free-form box works on the current step's task too.
+      if (st && selected !== st.id) selected = st.id;
+      const done = now.steps.filter(stepDone).length;
+      const pct = Math.round((done / now.steps.length) * 100);
+      const others = all.map((x) => `<span class="bcomp ${x === now ? "now" : x.steps.every(stepDone) ? "done" : "locked"}">${x.steps.every(stepDone) ? "✓ " : ""}${esc(x.c.title || "This week's build")}</span>`).join("");
+      const rows = now.steps
+        .map((x) => `<div class="bstep ${stepDone(x) ? "done" : x === st ? "now" : "locked"}"><span class="n">${stepDone(x) ? "✓" : x === st ? "▸" : "🔒"}</span>${esc(x.title || x.id)}</div>`)
+        .join("");
+      const head = `<div class="bhead"><div class="bcomps">${others}</div>
+        <h1 class="q">${esc(now.c.title || "This week's build")}</h1>
+        ${now.c.intro ? `<p class="lesson">${esc(now.c.intro)}</p>` : ""}
+        ${now.c.works ? `<p class="muted"><b>When it works:</b> ${esc(now.c.works).replace(/`([^`\n]+)`/g, "<code>$1</code>")}</p>` : ""}
+        <div class="bbar" role="progressbar" aria-valuenow="${pct}"><i style="width:${pct}%"></i></div>
+        <div class="bprogress">${esc(done)} of ${esc(now.steps.length)} steps</div></div>`;
+      let card;
+      if (finished) {
+        const next = all[all.indexOf(finished) + 1];
+        card = `<section class="bcard bfinish"><h2>✓ ${esc(finished.c.title)} works.</h2>
+          ${finished.c.works ? `<p class="lesson">${esc(finished.c.works)}</p>` : ""}
+          <div class="row">${finished.steps[0]?.found ? `<button class="btn" data-build-test="${esc(finished.steps[finished.steps.length - 1].id)}" data-w="${esc(finished.steps[finished.steps.length - 1].week)}">Run its tests again</button>` : ""}${finished.c.board ? `<button class="btn" data-do="tab" data-tab="board">See it on the board</button>` : ""}<button class="btn primary" data-build-seen="${esc(finished.c.id)}">${next ? `Next: ${esc(next.c.title || "the next part")}` : "Done"}</button></div></section>`;
+      } else if (!st) card = `<section class="bcard bfinish"><h2>✓ Everything this week is built.</h2><p class="lesson">Push your work with <code>git push</code> (or run npm start again: it pushes for you).</p></section>`;
+      else card = `${now.steps.filter(stepDone).map((x) => `<p class="bdoneline">✓ ${esc(x.title || x.id)}, done</p>`).join("")}${stepCard(st)}`;
+      const notes = /** @type {HTMLElement | null} */ (document.querySelector("[data-bnotes]"));
+      // Notes HTML is rendered by the studio from the student's own guide (escaped markdown).
+      const notesHtml = now.c.notes || `<p class="muted">No notes for this part.</p>`;
+      if (notes && notes.dataset.html !== notesHtml) {
+        notes.innerHTML = notesHtml;
+        notes.dataset.html = notesHtml;
+      }
+      const ui = /** @type {HTMLElement | null} */ (document.querySelector("[data-chatui]"));
+      if (ui) {
+        const ci = all.indexOf(now);
+        const totalDone = buildList.filter(stepDone).length;
+        const set = (/** @type {string} */ sel, /** @type {string} */ text) => {
+          const x = /** @type {HTMLElement | null} */ (ui.querySelector(sel));
+          if (x && x.textContent !== text) x.textContent = text;
+        };
+        set("[data-ctitle]", now.c.title || "This week's build");
+        set("[data-csub]", ` · Component ${ci + 1} of ${all.length}${st ? ` · step ${now.steps.indexOf(st) + 1} of ${now.steps.length}` : ""}`);
+        set("[data-cpct]", `${pct}% of steps done · ${totalDone} of ${buildList.length}`);
+        const bar = /** @type {HTMLElement | null} */ (ui.querySelector("[data-cbar]"));
+        if (bar) bar.style.width = `${pct}%`;
+        set('[data-ccount="steps"]', ` (${buildList.length})`);
+        const list = /** @type {HTMLElement | null} */ (ui.querySelector("[data-bsteplist]"));
+        const listHtml = all
+          .map((x) => `<h4>${esc(x.c.title || "This week's build")}</h4>${x.steps.map((y) => `<div class="crow ${stepDone(y) ? "done" : y === st ? "now" : "locked"}"><span>${stepDone(y) ? "✓" : y === st ? "▸" : "🔒"}</span><div><b>${esc(y.n)}. ${esc(y.title || y.id)}</b><div class="muted">${esc(y.test || y.testNote || "")}</div></div></div>`).join("")}`)
+          .join("");
+        if (list && list.dataset.html !== listHtml) {
+          list.innerHTML = listHtml;
+          list.dataset.html = listHtml;
+        }
+        const files = /** @type {HTMLElement | null} */ (ui.querySelector("[data-bfiles]"));
+        const touched = [...new Set((state?.entries ?? []).filter((x) => x.kind === "file").flatMap((x) => (x.changes ?? []).map((/** @type {any} */ c) => `${c.path}`)))];
+        const filesHtml = touched.length ? `<ul>${touched.map((f) => `<li><code>${esc(f)}</code></li>`).join("")}</ul>` : `<p class="muted">Files Codex changes show here.</p>`;
+        if (files && files.dataset.html !== filesHtml) {
+          files.innerHTML = filesHtml;
+          files.dataset.html = filesHtml;
+        }
+        ui.dataset.panel ||= chatPanel;
+      }
+      const html = ui ? `<div class="build guide">${card}</div>` : `<div class="build">${head}<div class="bsteps">${rows}</div>${card}</div>`;
+      if (box.dataset.html !== html) {
+        box.innerHTML = html;
+        box.dataset.html = html;
+      }
+    }
+
+    /** @param {number} week @param {HTMLElement} el */
+    async function mount(week, el) {
+      buildList = [];
+      mounted = { week, el, tasks: [] };
+      const mine = mounted;
+      const chat = week >= 4;
+      el.innerHTML = `${chat ? "" : `<div data-build></div>`}<div class="agbar"><span class="muted" data-agent-who></span></div>
+        <p class="agperms" data-agent-perms></p>
+        <div data-agent-status></div>
+        <div class="aglog" data-agent-log></div>
+        <div data-agent-cards></div>
+        <div class="agworking muted" data-agent-working hidden><i class="spin"></i> Codex is working…</div>
+        ${chat ? `<div data-build></div>` : ""}
+        <form class="agcomposer${chat ? " pinned" : ""}" data-agent-composer hidden>
+          <label class="sub" ${week >= 4 ? "hidden" : ""}>Working on <select name="agenttask" data-agent-task><option value="">no particular task</option></select></label>
+          <textarea name="agentmessage" rows="${week >= 4 ? 2 : 4}" placeholder="${week >= 4 ? "Ask the agent about this step…" : "Say how you want to approach it, then what you'd like Codex to do."}" spellcheck="true">${esc(draft)}</textarea>
+          <div class="row"><button class="btn primary" type="submit" data-agent-send>Send <kbd>⌘↵</kbd></button><button class="btn" type="button" data-agent-stop hidden>Stop</button></div>
+          ${week >= 4 ? `<p class="cdisclaim">The agent can make mistakes. Check its work with the tests.</p>` : ""}
+        </form>`;
+      paintAll();
+      paintState();
+      void act({ type: "agent-open" });
+      if (week >= 4) void loadBuild(mine);
+      const res = await fetch(`/api/agent/tasks?week=${week}`, { headers: { "x-studio-token": TOKEN } }).then((r) => r.json()).catch(() => null);
+      if (mounted !== mine) return;
+      mine.tasks = res?.tasks ?? [];
+      const select = /** @type {HTMLSelectElement} */ (el.querySelector("[data-agent-task]"));
+      select.innerHTML = `<option value="">no particular task</option>${mine.tasks.map((t) => `<option value="${esc(t.id)}">${t.week === week ? "" : `week ${esc(t.week)} · `}${esc(t.id)}: ${esc(t.description)}</option>`).join("")}`;
+      select.value = selected;
+      // From a Code card: the box in view, with "My approach: (your words…)" selected to type over.
+      if (focusBox) {
+        focusBox = false;
+        const box = /** @type {HTMLTextAreaElement | null} */ (el.querySelector("textarea[name=agentmessage]"));
+        if (box && !box.closest("[hidden]")) {
+          box.scrollIntoView({ block: "center" });
+          box.focus();
+          const end = box.value.indexOf("\n");
+          if (/^My approach:/.test(box.value)) box.setSelectionRange("My approach: ".length, end < 0 ? box.value.length : end);
+        }
+      }
+    }
+
+    async function submit() {
+      if (!mounted) return;
+      const box = /** @type {HTMLTextAreaElement} */ (mounted.el.querySelector("textarea[name=agentmessage]"));
+      const text = box.value.trim();
+      if (!text) return;
+      const r = await ask({ type: "agent-send", week: mounted.week, task: selected, text, clientId: clientId() });
+      if (!r.ok) return toast(r.error ?? "It didn't send.");
+      box.value = "";
+      draft = "";
+    }
+
+    // The divider between the chat and the panel: drag to resize (remembered while the page is open).
+    let chatWidth = 0;
+    document.addEventListener("pointerdown", (e) => {
+      const div = /** @type {HTMLElement} */ (e.target).closest?.("[data-cdiv]");
+      const grid = /** @type {HTMLElement | null} */ (div?.closest("[data-cgrid]") ?? null);
+      if (!div || !grid) return;
+      e.preventDefault();
+      const move = (/** @type {PointerEvent} */ m) => {
+        const box = grid.getBoundingClientRect();
+        chatWidth = Math.max(25, Math.min(75, ((m.clientX - box.left) / box.width) * 100));
+        grid.style.setProperty("--chat", `${chatWidth}%`);
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    });
+    document.addEventListener("submit", (e) => {
+      const form = /** @type {HTMLElement} */ (e.target);
+      if (form.matches?.("[data-agent-composer]")) {
+        e.preventDefault();
+        void submit();
+      } else if (form.matches?.("[data-agent-fix]")) {
+        e.preventDefault();
+        void act({ type: "agent-fix", typed: state?.fixCommand ?? "" });
+      }
+    });
+    document.addEventListener("input", (e) => {
+      const el = /** @type {HTMLInputElement} */ (e.target);
+      if (el.name === "agentmessage") draft = el.value;
+    });
+    document.addEventListener("change", (e) => {
+      const el = /** @type {HTMLSelectElement} */ (e.target);
+      if (el.matches?.("[data-week-select]")) {
+        const w = document.createElement("button");
+        w.dataset.w = el.value;
+        doAction("week", w);
+        return;
+      }
+      if (el.name === "agenttask") selected = el.value;
+    });
+    document.addEventListener("keydown", (e) => {
+      const el = /** @type {HTMLElement} */ (e.target);
+      if (/** @type {HTMLTextAreaElement} */ (el).name === "agentmessage" && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        void submit();
+      }
+    });
+    document.addEventListener("click", (e) => {
+      const el = /** @type {HTMLElement} */ (e.target).closest("[data-cpane-tab],[data-md-copy],[data-agent-answer],[data-agent-stop],[data-agent-login],[data-agent-open],[data-agent-recheck],[data-agent-commit],[data-agent-test],[data-build-send],[data-build-test],[data-build-commit],[data-build-seen],[data-agent-more]");
+      if (!(el instanceof HTMLElement)) return;
+      if (el.dataset.mdCopy !== undefined) {
+        const code = el.closest(".mdcode")?.querySelector("code")?.textContent ?? "";
+        void navigator.clipboard?.writeText(code).then(() => toast("Copied."), () => toast("Select the code and copy it."));
+        return;
+      }
+      if (el.dataset.agentAnswer) {
+        // Off at once: a second click can't answer twice, and the studio refuses a stale card anyway.
+        for (const b of el.parentElement?.querySelectorAll("button") ?? []) b.disabled = true;
+        void ask({ type: "agent-answer", key: el.dataset.key, decision: el.dataset.agentAnswer }).then((r) => {
+          if (!r.ok) {
+            toast(r.error ?? "That didn't go through.");
+            void refetch();
+          }
+        });
+      } else if (el.dataset.agentRecheck !== undefined) {
+        void act({ type: "agent-recheck" });
+      } else if (el.dataset.buildSend !== undefined) {
+        const st = buildList[Number(el.dataset.buildSend)];
+        if (!st || !mounted) return;
+        /** @type {HTMLButtonElement} */ (el).disabled = true;
+        void ask({ type: "agent-send", week: mounted.week, task: st.id, text: st.prompt, guided: true, clientId: clientId() }).then((/** @type {any} */ r) => {
+          if (!r.ok) toast(r.error ?? "It didn't send.");
+          mounted?.el.querySelector("[data-agent-log]")?.scrollIntoView({ block: "start" });
+        });
+      } else if (el.dataset.buildTest) {
+        void ask({ type: "code-test", week: Number(el.dataset.w), id: el.dataset.buildTest }).then((/** @type {any} */ r) => r.ok || toast(r.error ?? "That didn't run."));
+      } else if (el.dataset.buildCommit) {
+        /** @type {HTMLButtonElement} */ (el).disabled = true;
+        void ask({ type: "code-commit", week: Number(el.dataset.w), id: el.dataset.buildCommit }).then((/** @type {any} */ r) => {
+          toast(r.ok ? (r.said ?? "Committed.") : (r.error ?? "That didn't go through."));
+          if (r.ok && mounted) void loadBuild(mounted); // on to the next step
+          // The board reruns with the new code.
+          const frame = /** @type {HTMLIFrameElement | null} */ (document.querySelector("iframe.board"));
+          if (r.ok && frame) frame.src = frame.src;
+        });
+      } else if (el.dataset.buildSeen) {
+        try {
+          localStorage.setItem(seenKey(el.dataset.buildSeen), "1");
+        } catch {
+          // not remembered: it shows once more next time
+        }
+        paintBuild();
+      } else if (el.dataset.agentMore !== undefined) {
+        const form = /** @type {HTMLElement | null} */ (mounted?.el.querySelector("[data-agent-composer]") ?? null);
+        if (form) {
+          form.dataset.open = form.dataset.open ? "" : "1";
+          paintState();
+          if (form.dataset.open) /** @type {HTMLElement | null} */ (form.querySelector("textarea"))?.focus();
+        }
+      } else if (el.dataset.cpaneTab) {
+        chatPanel = el.dataset.cpaneTab;
+        const ui = /** @type {HTMLElement | null} */ (document.querySelector("[data-chatui]"));
+        if (ui) ui.dataset.panel = chatPanel;
+      } else if (el.dataset.agentTest) {
+        void ask({ type: "code-test", week: Number(el.dataset.w), id: el.dataset.agentTest, fromAgent: true }).then((/** @type {any} */ r) => r.ok || toast(r.error ?? "That didn't run."));
+      } else if (el.dataset.agentCommit) {
+        /** @type {HTMLButtonElement} */ (el).disabled = true;
+        void ask({ type: "code-commit", week: Number(el.dataset.w), id: el.dataset.agentCommit }).then((/** @type {any} */ r) => toast(r.ok ? (r.said ?? "Committed.") : (r.error ?? "That didn't go through.")));
+      } else if (el.dataset.agentStop !== undefined) void act({ type: "agent-stop" });
+      else if (el.dataset.agentLogin !== undefined) void act({ type: "agent-login" });
+      else if (el.dataset.agentOpen !== undefined) void act({ type: "agent-open" });
+    });
+
+    return {
+      onEvent,
+      /** After each render: mount the tab when it's shown. */
+      sync() {
+        const el = /** @type {HTMLElement | null} */ (document.querySelector("[data-agenttab]"));
+        if (!el) {
+          mounted = null;
+          return;
+        }
+        const week = Number(el.dataset.agenttab);
+          if (!mounted || mounted.el !== el || mounted.week !== week) void mount(week, el);
+        else paintBuild();
+        const grid = /** @type {HTMLElement | null} */ (document.querySelector("[data-cgrid]"));
+        if (grid && chatWidth) grid.style.setProperty("--chat", `${chatWidth}%`);
+      },
+      /** The Code tab's "Send to the agent": the prompt in the box, the task selected; the student adds their approach and sends. @param {string} task @param {string} text */
+      prefill(task, text) {
+        selected = task;
+        draft = text;
+        focusBox = true;
+        mounted = null;
+      },
+    };
+  })();
+
+  /**
+   * Every week, one click away, above a week's view (the Build view hides the course list): weeks
+   * that are in open their page or Build view; the rest are greyed out. The agent's conversation is
+   * the studio's, so switching weeks doesn't lose it. @param {number} shown
+   */
+  function weekSwitcher(shown) {
+    const weeks = [...(snap?.groups ?? [])].filter((x) => x.week >= 1).sort((a, b) => a.week - b.week).filter((x, i, all) => all.findIndex((y) => y.week === x.week) === i);
+    const pills = weeks
+      .map((x) => {
+        const open = weekIsIn(x);
+        const label = `Week ${x.week}`;
+        const tip = `${label} · ${x.title}${x.week === snap?.home ? " (today)" : ""}`;
+        return open
+          ? `<button class="wpill ${x.week === shown ? "on" : ""} ${x.week === snap?.home ? "today" : ""}" data-do="week" data-w="${esc(x.week)}" title="${esc(tip)}" ${x.week === shown ? 'aria-current="page"' : ""}>${esc(label)}</button>`
+          : `<button class="wpill" disabled title="${esc(`${label}: not in your work yet`)}">${esc(label)}</button>`;
+      })
+      .join("");
+    const options = weeks.map((x) => `<option value="${esc(x.week)}" ${x.week === shown ? "selected" : ""} ${weekIsIn(x) ? "" : "disabled"}>Week ${esc(x.week)} · ${esc(x.title)}</option>`).join("");
+    return `<nav class="wswitch" aria-label="Weeks"><div class="wpills">${pills}</div><select class="wselect" data-week-select aria-label="Go to a week">${options}</select></nav>`;
+  }
 
   function weekView(g) {
     const nn = String(g.week).padStart(2, "0");
-    const tabs = [["page", g.page ? "Lesson page" : "Guide"], ...(g.kind !== "setup" ? [["code", "Code"]] : []), ...(g.note ? [["note", g.kind === "setup" ? "Your notes" : "Design note"]] : []), ["board", "Board"], ["checks", "Checks"]];
-    const tab = tabs.some(([id]) => id === weekTab) ? weekTab : "page";
+    // From week 4 the class is building: the Build tab (the agent, step by step) comes first.
+    const building = g.kind !== "setup" && g.week >= 4;
+    // Build weeks have no Lesson page tab: the Build view holds the concept, notes and steps, and the
+    // full page opens in its own browser tab from the panel ("Full lesson").
+    const tabs = [...(building ? [["agent", "Build"]] : []), ...(building ? [] : [["page", g.page ? "Lesson page" : "Guide"]]), ...(g.kind !== "setup" ? [["code", "Code"], ...(building ? [] : [["agent", "Agent"]])] : []), ...(g.note ? [["note", g.kind === "setup" ? "Your notes" : "Design note"]] : []), ["board", "Board"], ["checks", "Checks"]];
+    const tab = tabs.some(([id]) => id === weekTab) ? weekTab : tabs[0][0];
     const bar = `<div class="tabs" role="tablist">${tabs.map(([id, label]) => `<button role="tab" class="tab ${id === tab ? "on" : ""}" data-do="tab" data-tab="${id}" aria-selected="${id === tab}">${esc(label)}</button>`).join("")}</div>`;
     /** @type {string} */
     let body;
-    if (tab === "page") body = `<iframe class="doc" title="Week ${g.week} lesson page" src="/week/${g.week}"></iframe>`;
+    // A page in a frame: links inside it move the frame, so "Back to the lesson" (outside it) brings it home.
+    const framed = (/** @type {string} */ src, /** @type {string} */ title, /** @type {string} */ label) =>
+      `<div class="framebar"><button class="btn ghost" data-do="frame-back">← Back to ${esc(label)}</button></div><iframe class="doc" title="${esc(title)}" src="${esc(src)}" data-home="${esc(src)}"></iframe>`;
+    if (tab === "page") body = framed(`/week/${g.week}`, `Week ${g.week} lesson page`, g.page ? "the lesson" : "the guide");
     else if (tab === "note")
-      body = `<p class="sub">Your ${g.kind === "setup" ? "notes" : "design note"}, <code>${esc(g.note ?? "")}</code>. Write it in VS Code (<code>code ${esc(g.note ?? "")}</code>); it shows here as you save.</p><iframe class="doc" title="Week ${g.week} note" src="/${esc(g.note ?? "")}"></iframe>`;
+      body = `<p class="sub">Your ${g.kind === "setup" ? "notes" : "design note"}, <code>${esc(g.note ?? "")}</code>. Write it in VS Code (<code>code ${esc(g.note ?? "")}</code>); open this tab again to see what you saved.</p>${framed(`/${g.note ?? ""}`, `Week ${g.week} note`, g.kind === "setup" ? "your notes" : "your note")}`;
     else if (tab === "board") body = boardPanel();
     // The tasks are drawn by codeTab (their editors outlive the page's re-renders).
     else if (tab === "code") body = `<div class="codetab" data-codetab="${esc(g.week)}"><p class="why">Loading this week's tasks…</p></div>`;
+    // Drawn by agentTab, from the studio's state (its conversation outlives the page's re-renders).
+    // A build week's Build tab is one screen: the guided step and the agent on the left; the board and
+    // the component's design notes beside it.
+    // The chat on the left, and a panel on the right (Visualizer, Design notes, Steps, Files) whose
+    // tabs only show and hide its panes, so the chat never moves.
+    else if (tab === "agent" && building)
+      body = `<div class="chatui" data-chatui>
+        <div class="ctop"><div><b data-ctitle>This week's build</b><span class="csub" data-csub></span></div><div class="cprog"><span data-cpct></span><div class="bbar"><i data-cbar style="width:0%"></i></div></div></div>
+        <div class="cgrid" data-cgrid>
+          <div class="ccol"><div class="agenttab" data-agenttab="${esc(g.week)}"></div></div>
+          <div class="cdiv" data-cdiv title="Drag to resize"></div>
+          <aside class="cpanel" data-cpanel>
+            <div class="ctabs">${[["viz", "Visualizer"], ...(g.page ? [["lesson", "Lesson"]] : []), ["notes", "Design notes"], ["steps", "Steps"], ["files", "Files"]].map(([id, label]) => `<button class="ctab" data-cpane-tab="${id}">${label}<span data-ccount="${id}"></span></button>`).join("")}${g.page ? `<a class="ctab fulllesson" href="/week/${esc(g.week)}" target="_blank" rel="noopener noreferrer">Full lesson ↗</a>` : ""}</div>
+            <div class="cpane" data-pane="viz">${boardPanel()}</div>
+            <div class="cpane md" data-pane="notes"><div data-bnotes><p class="muted">The notes for the part you're building show here.</p></div></div>
+            <div class="cpane" data-pane="steps"><div data-bsteplist></div></div>
+            ${g.page ? `<div class="cpane" data-pane="lesson">${framed(`/week/${g.week}`, `Week ${g.week} lesson page`, "the lesson")}</div>` : ""}
+            <div class="cpane" data-pane="files"><div data-bfiles><p class="muted">Files Codex changes show here.</p></div></div>
+          </aside>
+        </div></div>`;
+    else if (tab === "agent") body = `<div class="agenttab" data-agenttab="${esc(g.week)}"></div>`;
     else body = checksPanel(g.week, g.kind === "setup" ? "npm run doctor" : `npx vitest run tests/week-${nn}`);
-    return `<div class="weekhead"><p class="eyebrow">Week ${esc(g.week)}${g.kind ? ` · ${esc(g.kind)}` : ""}</p><h1 class="q">${esc(g.title)}</h1></div>${bar}<div class="tabbody">${body}</div>`;
+    return `${weekSwitcher(g.week)}<div class="weekhead"><p class="eyebrow">Week ${esc(g.week)}${g.kind ? ` · ${esc(g.kind)}` : ""}</p><h1 class="q">${esc(g.title)}</h1></div>${bar}<div class="tabbody">${body}</div>`;
   }
 
   /** The board, run by the studio: start it, watch it here, stop it (it stops with the studio too). */
@@ -4863,6 +7087,7 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
     paintLine();
     paintOutput();
     codeTab.sync();
+    agentTab.sync();
     const input = focused ? /** @type {HTMLInputElement | null} */ (document.querySelector(`input[name="${focused}"]`)) : null;
     if (input) {
       // Put the cursor back at the end (email fields have no setSelectionRange, so reset the value instead).
@@ -4910,10 +7135,15 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
       remember();
       return render();
     }
+    if (what === "frame-back") {
+      const frame = /** @type {HTMLIFrameElement | null} */ ((el?.closest(".cpane") ?? el?.closest(".tabbody"))?.querySelector("iframe[data-home]") ?? null);
+      if (frame?.dataset.home) frame.src = frame.dataset.home;
+      return;
+    }
     if (what === "board-start" || what === "board-stop") return act({ type: what });
     if (what === "checks") return act({ type: "checks", week: Number(el?.dataset.w) });
     if (what === "week") {
-      if (viewingWeek !== Number(el?.dataset.w)) weekTab = "page";
+      if (viewingWeek !== Number(el?.dataset.w)) weekTab = "";
       viewingWeek = Number(el?.dataset.w);
       viewing = null;
       machineOpen = false;
@@ -4974,6 +7204,7 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
   });
   document.addEventListener("submit", (e) => {
     e.preventDefault();
+    if (/** @type {HTMLElement} */ (e.target).matches?.("[data-agent-composer],[data-agent-fix]")) return; // agentTab's
     const step = currentStep();
     if (!step) return;
     const values = Object.fromEntries(new FormData(/** @type {HTMLFormElement} */ (e.target)).entries());
@@ -5037,7 +7268,7 @@ function studioClient(TOKEN, WEEK1_GUIDE_URL) {
  * @param {string} token
  */
 export function studioPage(token) {
-  const shared = [pasteAllowed, lineStart, lineKey, linePaste, lineComplete, enterAction, cleanOutput, lastLine, corePhase, describeTick, machinePlayer].map((f) => f.toString()).join("\n");
+  const shared = [pasteAllowed, lineStart, lineKey, linePaste, lineComplete, enterAction, cleanOutput, lastLine, corePhase, describeTick, machinePlayer, chatMarkdown, plainCommand].map((f) => f.toString()).join("\n");
   // JSON inside a <script>: escape < so no string in it can close the script tag.
   const js = (/** @type {unknown} */ value) => JSON.stringify(value).replace(/</g, "\\u003c");
   const data = `const MACHINE_TRACE = ${js(MACHINE_TRACE)};\nconst SKETCHES = ${js(SKETCHES)};`;
@@ -5245,8 +7476,8 @@ export function realContext({ dryRun = false, fresh = false, interactive = true 
         mkdirSync(dirname(STATE_FILE), { recursive: true });
         // doctorOk too: the doctor passing can't be checked again without running it, so the next
         // run (and the next week) needs it.
-        const { login, parent, repoDir, chatgpt, codexVersion, doctorOk } = state;
-        writeFileSync(STATE_FILE, JSON.stringify({ login, parent, repoDir, chatgpt, codexVersion, doctorOk }, null, 2));
+        const { login, parent, repoDir, chatgpt, codexVersion, doctorOk, agentThreads } = state;
+        writeFileSync(STATE_FILE, JSON.stringify({ login, parent, repoDir, chatgpt, codexVersion, doctorOk, agentThreads }, null, 2));
       } catch {
         // Remembering is a convenience; the checks find everything again anyway.
       }
@@ -5289,7 +7520,7 @@ function dryRunStream(argv, cwd, onData) {
 }
 
 /**
- * @typedef {CourseWeek & { status: "setup" | "done" | "inwork" | "get" | "later" | "future", start: number, count: number, update?: boolean }} WeekGroup
+ * @typedef {CourseWeek & { status: "setup" | "done" | "inwork" | "get" | "later" | "future" | "open", start: number, count: number, update?: boolean, label?: string }} WeekGroup
  *   One week in the studio's list. start/count: its steps in the flow (count 0: a heading only).
  *   setup: week 1, re-checked. done: in work, a later week too. inwork: the newest week in work.
  *   get: the week to get now. later: published, after the one to get. future: not out yet.
@@ -5303,10 +7534,12 @@ function dryRunStream(argv, cwd, onData) {
  * week to get comes next; weeks not out yet are greyed out. Steps already done tick themselves off
  * (meta.autoSteps), so the student lands on the first thing left to do.
  * @param {Context} ctx
- * @param {{ forceSetup?: boolean, withSetup?: boolean, weekList?: CourseWeek[] }} [options]
- * @returns {{ steps: Step[], meta: { mode: "setup" | "week", week?: number, published?: boolean, setupSteps?: number, autoSteps?: number, inWork?: boolean, next?: number, groups?: WeekGroup[], update?: boolean } }}
+ * @param {{ forceSetup?: boolean, withSetup?: boolean, weekList?: CourseWeek[], today?: number }} [options]
+ *   today: the week the class is on (weeks.json's "current"); later weeks may be out already, but the
+ *   studio opens on today's, and weeks from today on aren't shown as done (nobody has done them yet).
+ * @returns {{ steps: Step[], meta: { mode: "setup" | "week", week?: number, published?: boolean, setupSteps?: number, autoSteps?: number, inWork?: boolean, next?: number, groups?: WeekGroup[], update?: boolean, home?: number } }}
  */
-export function chooseFlow(ctx, { forceSetup = false, withSetup = false, weekList = COURSE_WEEKS } = {}) {
+export function chooseFlow(ctx, { forceSetup = false, withSetup = false, weekList = COURSE_WEEKS, today = 0 } = {}) {
   // A folder remembered from last time that isn't a copy of this course (an old netsim-starter copy,
   // or one that's gone) is forgotten, with what was checked in it: its pages and its doctor result
   // aren't this course's. Setup makes the new copy.
@@ -5338,19 +7571,7 @@ export function chooseFlow(ctx, { forceSetup = false, withSetup = false, weekLis
   // Week N had been in work before (an older version of it): getting it again is an update.
   const hadBefore = (/** @type {number} */ n) => n === 1 || n <= newest || ctx.capture(["git", "cat-file", "-e", `work:docs/weeks/week-${String(n).padStart(2, "0")}.md`], dir)?.code === 0;
   const waiting = published.filter((n) => !merged.includes(n));
-  let toGet = waiting[0] ?? null;
-  // Updates waiting before a newer week that already holds them (each release is built on the last)
-  // come along with it: the student gets the newest week straight away, not the update first.
-  // Comparing the weeks needs their commits: fetch the week tags if one isn't here yet (it only
-  // moves upstream/week-N, never the student's work).
-  const missing = (/** @type {number} */ n) => ctx.capture(["git", "cat-file", "-e", `${tips.get(n)}^{commit}`], dir)?.code !== 0;
-  if (waiting.length > 1 && !ctx.dryRun && waiting.some(missing)) ctx.capture(gitArgv(ctx, ["fetch", "-q", "upstream"]), dir);
-  for (const n of waiting.slice(1)) {
-    const before = waiting.filter((m) => m < n);
-    const holds = before.every((m) => hadBefore(m) && ctx.capture(["git", "merge-base", "--is-ancestor", /** @type {string} */ (tips.get(m)), /** @type {string} */ (tips.get(n))], dir)?.code === 0);
-    if (!holds) break;
-    toGet = n;
-  }
+  const toGet = newestHolding(ctx, dir, waiting, tips);
   const getting = toGet;
   const brought = getting === null ? [] : waiting.filter((m) => m < getting);
   /** @type {Step[]} */
@@ -5363,8 +7584,12 @@ export function chooseFlow(ctx, { forceSetup = false, withSetup = false, weekLis
     steps.push(...list);
   };
   add(1, "setup", courseSteps());
+  // Weeks from today's on that are (or are about to be) in the folder: open to look at and build in,
+  // with no steps of their own, so nothing is ticked off that the student hasn't done.
+  const ahead = (/** @type {number} */ n) => today > 0 && n >= today && n !== (toGet ?? newest);
   for (const n of [...new Set([...merged, ...brought])].filter((m) => m > 1).sort((a, b) => a - b)) {
-    if (brought.includes(n)) add(n, "done", doneWeekSteps(n, `Week ${n}'s update comes with week ${toGet}.`));
+    if (ahead(n)) groups.push({ ...entry(n), status: "open", start: 0, count: 0 });
+    else if (brought.includes(n)) add(n, "done", doneWeekSteps(n, hadBefore(n) ? `Week ${n}'s update comes with week ${toGet}.` : `Week ${n} comes with week ${toGet}.`));
     else add(n, n === newest && toGet === null ? "inwork" : "done", n === newest && toGet === null ? inWorkSteps(n) : doneWeekSteps(n));
   }
   const autoSteps = steps.length;
@@ -5373,13 +7598,23 @@ export function chooseFlow(ctx, { forceSetup = false, withSetup = false, weekLis
     // An earlier week changed after a later one came in (a fix Praise published): an update, not a second week 1.
     if (hadBefore(toGet)) groups[groups.length - 1].update = true;
   }
+  // One tag can hold several weeks (Praise publishes week 8 with 4-7 inside): a week below the one
+  // being got (or the newest in work) comes with it, so it's open, not "not out yet".
+  const top = toGet ?? newest;
   for (const w of later(2)) {
     if (groups.some((g) => g.week === w.week)) continue;
-    groups.push({ ...w, status: published.includes(w.week) ? "later" : "future", start: steps.length, count: 0 });
+    groups.push({ ...w, status: today > 0 && w.week < top ? "open" : published.includes(w.week) ? "later" : "future", start: steps.length, count: 0 });
   }
+  // Headings with no steps sit after the steps (their start is the end).
+  for (const g of groups) if (g.count === 0) g.start = steps.length;
+  // The newest week's own steps are getting (or keeping up) the course's work: when that week is
+  // ahead of the class, they're labelled as that, not as the week.
+  const topGroup = groups.find((g) => g.week === top && g.count > 0 && g.status !== "setup");
+  if (topGroup && today > 0 && topGroup.week > today) topGroup.label = topGroup.status === "get" ? "Get this week's work" : "Your work";
+  const home = today > 0 && groups.some((g) => g.week === today && g.status !== "future" && g.status !== "later") ? { home: today } : {};
   const setupSteps = groups[0].count;
-  if (toGet !== null) return { steps, meta: { mode: "week", week: toGet, published: true, setupSteps, autoSteps, groups, ...(groups.some((g) => g.update) ? { update: true } : {}) } };
-  if (newest > 1) return { steps, meta: { mode: "week", week: newest, published: true, setupSteps, autoSteps, inWork: true, next: newest + 1, groups } };
+  if (toGet !== null) return { steps, meta: { mode: "week", week: toGet, published: true, setupSteps, autoSteps, groups, ...home, ...(groups.some((g) => g.update) ? { update: true } : {}) } };
+  if (newest > 1) return { steps, meta: { mode: "week", week: newest, published: true, setupSteps, autoSteps, inWork: true, next: newest + 1, groups, ...home } };
   return { steps, meta: { mode: "week", week: 2, published: false, setupSteps, autoSteps, groups } };
 }
 
@@ -5432,19 +7667,22 @@ export function inWorkSteps(week) {
  * @param {Context & { close: () => void }} ctx
  * @param {{ open?: boolean, port?: number, forceSetup?: boolean, weekList?: CourseWeek[], focus?: number }} options
  */
-async function runStudio(ctx, { open = true, port = 0, forceSetup = false, weekList = COURSE_WEEKS, focus = 0 }) {
-  const { steps, meta } = chooseFlow(ctx, { forceSetup, withSetup: true, weekList });
+async function runStudio(ctx, { open = true, port = 0, forceSetup = false, weekList = COURSE_WEEKS, focus = 0, today = 0 }) {
+  const { steps, meta } = chooseFlow(ctx, { forceSetup, withSetup: true, weekList, today });
   if (focus) Object.assign(meta, { focus });
   const studio = createStudio(ctx, steps, meta);
   /** @type {Awaited<ReturnType<typeof serveStudio>> | null} */
   let server = null;
   /** @param {string} why @param {number} code */
-  const stop = (why, code) => {
+  const stop = async (why, code) => {
     studio.stop();
     server?.close();
     console.log(`\n${why}\n${QUIT_MESSAGE}`);
+    // Its Codex goes with it: a bounded wait, then only that child's tree.
+    await Promise.race([studio.shutdown(), new Promise((resolve) => setTimeout(resolve, 3500))]);
     process.exit(code);
   };
+
   process.on("SIGINT", () => stop("Stopped.", 130));
   process.on("SIGTERM", () => stop("Stopped.", 143));
   server = await serveStudio(studio, { port, onIdle: () => stop("The studio tab was closed, so the studio stopped.", 0), log: (l) => process.env.NETSIM_STUDIO_DEBUG && console.log(l) });
@@ -5487,6 +7725,27 @@ async function fromCourse(week, file) {
  * @param {number | null} newest
  * @returns {Promise<CourseWeek[]>}
  */
+/**
+ * The week the class is on (weeks.json's "current", which Praise moves each Monday): the studio
+ * opens on it, even when later weeks are already out. From the newest published week on GitHub,
+ * else the course folder's copy; null when neither says.
+ * @param {Context} ctx
+ * @param {number | null} newest
+ * @returns {Promise<number | null>}
+ */
+export async function loadCurrentWeek(ctx, newest) {
+  const local = ctx.readText(join(ctx.cwd, "weeks.json"));
+  for (const text of [newest ? await fromCourse(newest, "weeks.json") : null, local]) {
+    try {
+      const current = text ? JSON.parse(text).current : null;
+      if (Number.isInteger(current) && current >= 1) return current;
+    } catch {
+      // not usable: try the next one
+    }
+  }
+  return null;
+}
+
 export async function loadWeekList(ctx, newest) {
   const local = ctx.readText(join(ctx.cwd, "weeks.json"));
   for (const text of [newest ? await fromCourse(newest, "weeks.json") : null, local]) {
@@ -5516,7 +7775,7 @@ export async function newerStudio(newest, dir = dirname(STATE_FILE)) {
   writeFileSync(path, text);
   // Its code box comes with it (a course folder from an earlier week doesn't have one yet).
   const editor = await fromCourse(newest, "studio/editor.js");
-  if (editor) writeFileSync(join(dir, "editor.js"), editor);
+  if (editor) writeFileSync(join(dir, "editor.js"), editor); // the new studio checks it against its own hash
   return path;
 }
 
@@ -5564,8 +7823,9 @@ async function main() {
     }
   }
   const weekList = await loadWeekList(ctx, newest);
-  if (!terminal) return runStudio(ctx, { open: !args.includes("--no-open"), port: portArg === -1 ? 0 : Number(args[portArg + 1]), forceSetup, weekList, focus });
-  const { steps, meta } = chooseFlow(ctx, { forceSetup, withSetup: true, weekList });
+  const today = await loadCurrentWeek(ctx, newest);
+  if (!terminal) return runStudio(ctx, { open: !args.includes("--no-open"), port: portArg === -1 ? 0 : Number(args[portArg + 1]), forceSetup, weekList, focus, today: today ?? 0 });
+  const { steps, meta } = chooseFlow(ctx, { forceSetup, withSetup: true, weekList, today: today ?? 0 });
   const week = meta.mode === "week" ? meta.week : undefined;
   const { quit } = await runSteps(steps, ctx, { week, setupSteps: meta.setupSteps ?? 0, autoSteps: meta.autoSteps, published: meta.published !== false, nextWeek: meta.next ?? 0, groups: meta.groups ?? [] });
   const home = (meta.groups ?? []).find((g) => g.week === (focus || week));
